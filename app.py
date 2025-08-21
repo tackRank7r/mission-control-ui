@@ -4,38 +4,39 @@ from flask import Flask, request, make_response
 from dotenv import load_dotenv
 from openai import OpenAI
 from twilio.twiml.voice_response import VoiceResponse, Gather
-
 from twilio.request_validator import RequestValidator
-import os
 
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-
-def is_valid_twilio_request(req) -> bool:
-    """Validate Twilio signature on incoming webhook."""
-    validator = RequestValidator(TWILIO_AUTH_TOKEN)
-    url = req.url
-    params = dict(req.form) if req.method == "POST" else {}
-    signature = req.headers.get("X-Twilio-Signature", "")
-    return validator.validate(url, params, signature)
-
-# ---------- Setup ----------
+# --------- Load local .env in development (Render uses Env Vars) ----------
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
+# --------- Secrets / Config ----------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+# For temporary testing without Twilio signature validation, set to "true" in env.
+SKIP_TWILIO_VALIDATION = os.getenv("SKIP_TWILIO_VALIDATION", "false").lower() == "true"
+
+# --------- Clients ----------
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# --------- App ----------
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
-# ---------- Helpers ----------
+# --------- Helpers ----------
 def https_base() -> str:
-    """Return your public base URL, forced to https (Twilio expects https)."""
-    # Respect X-Forwarded-Proto if present (some proxies set it)
+    """
+    Build an absolute HTTPS base URL for callbacks.
+    Works behind proxies/Render (Twilio requires https).
+    """
     proto = request.headers.get("X-Forwarded-Proto", "http")
     base = request.url_root
     if proto == "https" and base.startswith("http://"):
         base = base.replace("http://", "https://", 1)
-    # Fallback force https
     base = base.replace("http://", "https://", 1)
     return base.rstrip("/")
+
+def twiml(vr: VoiceResponse):
+    return str(vr), 200, {"Content-Type": "text/xml"}
 
 def ask_gpt(prompt: str) -> str:
     try:
@@ -49,54 +50,72 @@ def ask_gpt(prompt: str) -> str:
         app.logger.exception("OpenAI error")
         return f"Sorry, I hit an error talking to ChatGPT: {e}"
 
-def twiml(vr: VoiceResponse):
-    return str(vr), 200, {"Content-Type": "text/xml"}
+# ---- Twilio signature validation ----
+def is_valid_twilio_request(req) -> bool:
+    """
+    Verify that this request genuinely came from Twilio.
+    Twilio sends 'X-Twilio-Signature' for webhooks.
+    """
+    if SKIP_TWILIO_VALIDATION:
+        return True  # allow while you're testing; turn off in production
 
-# ---------- Basic routes ----------
+    if not TWILIO_AUTH_TOKEN:
+        app.logger.warning("TWILIO_AUTH_TOKEN not set; rejecting webhook.")
+        return False
+
+    signature = req.headers.get("X-Twilio-Signature", "")
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    # Twilio signs full URL + POST params (GET will have no params)
+    url = req.url
+    params = dict(req.form) if req.method == "POST" else {}
+    try:
+        return validator.validate(url, params, signature)
+    except Exception as e:
+        app.logger.exception("Twilio validation error: %r", e)
+        return False
+
+# --------- Basic / diagnostics routes ----------
 @app.route("/")
 def home():
     return "Flask + GPT is running. Try /ask?text=Hello"
 
 @app.route("/ask", methods=["GET", "POST"])
 def ask():
-    if request.method == "GET":
-        text = (request.args.get("text") or "").strip()
-    else:
-        data = request.get_json(silent=True) or {}
-        text = (data.get("text") or "").strip()
+    text = (request.args.get("text") or "").strip() if request.method == "GET" else (
+        (request.get_json(silent=True) or {}).get("text") or ""
+    ).strip()
     if not text:
         return make_response("Provide text via ?text=... or JSON {'text':'...'}", 400)
     answer = ask_gpt(text)
-    resp = make_response(answer, 200)
-    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
-    return resp
+    r = make_response(answer, 200)
+    r.headers["Content-Type"] = "text/plain; charset=utf-8"
+    return r
 
-# ---------- Diagnostics ----------
 @app.route("/health", methods=["GET"])
 def health():
     return "OK", 200
 
 @app.route("/voice-test", methods=["GET", "POST"])
 def voice_test():
-    app.logger.info("VOICE-TEST hit: method=%s url=%s", request.method, request.url)
+    app.logger.info("VOICE-TEST hit: %s %s", request.method, request.url)
     vr = VoiceResponse()
     vr.say("Your Twilio webhook is connected. This is a test.")
     return twiml(vr)
 
-# ---------- Twilio call flow ----------
+# --------- Twilio call flow ----------
 @app.route("/voice", methods=["GET", "POST"])
-@app.route("/voice", methods=["GET","POST"])
 def voice():
+    app.logger.info("VOICE hit: %s %s", request.method, request.url)
+
     if not is_valid_twilio_request(request):
+        app.logger.warning("Invalid Twilio signature on /voice")
         return "Forbidden", 403
-    # your existing VoiceResponse code here
-def voice():
-    app.logger.info("VOICE hit: method=%s url=%s", request.method, request.url)
+
     vr = VoiceResponse()
     try:
         gather = Gather(
             input="speech",
-            action=f"{https_base()}/gather",  # absolute https
+            action=f"{https_base()}/gather",
             method="POST",
             language="en-US",
             speechTimeout="auto",
@@ -104,7 +123,7 @@ def voice():
         gather.say("Hi! What can I help you with?")
         vr.append(gather)
 
-        # If nothing captured, reprompt
+        # Fallback loop if nothing captured
         vr.redirect(f"{https_base()}/voice")
         return twiml(vr)
     except Exception:
@@ -114,18 +133,14 @@ def voice():
 
 @app.route("/gather", methods=["GET", "POST"])
 def gather():
-    @app.route("/gather", methods=["GET","POST"])
-def gather():
+    app.logger.info("GATHER hit: %s %s form=%s", request.method, request.url, dict(request.form))
+
     if not is_valid_twilio_request(request):
+        app.logger.warning("Invalid Twilio signature on /gather")
         return "Forbidden", 403
-    # your existing gather code here
-    app.logger.info(
-        "GATHER hit: method=%s url=%s form=%s",
-        request.method, request.url, dict(request.form)
-    )
+
     vr = VoiceResponse()
     try:
-        # If GET (browser/misfire), reprompt
         if request.method == "GET":
             vr.say("Let's try that again.")
             vr.redirect(f"{https_base()}/voice")
@@ -153,14 +168,14 @@ def gather():
             speechTimeout="auto",
         )
         vr.append(again)
-
         return twiml(vr)
+
     except Exception:
         app.logger.exception("ERROR in /gather")
         vr.say("I hit an application error while processing your speech. Please try again.")
         vr.redirect(f"{https_base()}/voice")
         return twiml(vr)
 
-# ---------- Main ----------
+# --------- Main ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
