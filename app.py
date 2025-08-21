@@ -5,6 +5,19 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from twilio.twiml.voice_response import VoiceResponse, Gather
 
+from twilio.request_validator import RequestValidator
+import os
+
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
+
+def is_valid_twilio_request(req) -> bool:
+    """Validate Twilio signature on incoming webhook."""
+    validator = RequestValidator(TWILIO_AUTH_TOKEN)
+    url = req.url
+    params = dict(req.form) if req.method == "POST" else {}
+    signature = req.headers.get("X-Twilio-Signature", "")
+    return validator.validate(url, params, signature)
+
 # ---------- Setup ----------
 load_dotenv()
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -72,6 +85,11 @@ def voice_test():
 
 # ---------- Twilio call flow ----------
 @app.route("/voice", methods=["GET", "POST"])
+@app.route("/voice", methods=["GET","POST"])
+def voice():
+    if not is_valid_twilio_request(request):
+        return "Forbidden", 403
+    # your existing VoiceResponse code here
 def voice():
     app.logger.info("VOICE hit: method=%s url=%s", request.method, request.url)
     vr = VoiceResponse()
@@ -96,6 +114,11 @@ def voice():
 
 @app.route("/gather", methods=["GET", "POST"])
 def gather():
+    @app.route("/gather", methods=["GET","POST"])
+def gather():
+    if not is_valid_twilio_request(request):
+        return "Forbidden", 403
+    # your existing gather code here
     app.logger.info(
         "GATHER hit: method=%s url=%s form=%s",
         request.method, request.url, dict(request.form)
