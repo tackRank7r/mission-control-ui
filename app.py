@@ -22,6 +22,19 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
+@app.route("/whereami")
+def whereami():
+    # shows the exact public base URL Twilio/you should use
+    from flask import request
+    return {
+        "host": request.host,               # e.g., ai-secretary.onrender.com
+        "host_url": request.host_url,       # e.g., https://ai-secretary.onrender.com/
+        "url_root": request.url_root,       # same as above
+        "full_url_you_hit": request.url,    # includes path (/whereami)
+        "scheme": request.scheme            # http/https
+    }
+
+
 # --------- Helpers ----------
 def https_base() -> str:
     """
@@ -177,5 +190,8 @@ def gather():
         return twiml(vr)
 
 # --------- Main ----------
+# --------- Main ----------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.getenv("PORT", "5000"))  # <-- use Render's PORT if present
+    app.run(host="0.0.0.0", port=port)
+
