@@ -5,42 +5,41 @@ from dotenv import load_dotenv
 from openai import OpenAI
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
+from twilio.rest import Client as TwilioClient
 
-# --------- Load local .env in development (Render uses Env Vars) ----------
+# ---------- Load .env FIRST (Render uses env vars; this helps local dev) ----------
 load_dotenv()
 
-# --------- Secrets / Config ----------
+# ---------- Secrets / Config ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Twilio creds (used for both signature validation and outbound calls)
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_NUMBER = os.getenv("TWILIO_NUMBER", "")
+
 # For temporary testing without Twilio signature validation, set to "true" in env.
 SKIP_TWILIO_VALIDATION = os.getenv("SKIP_TWILIO_VALIDATION", "false").lower() == "true"
 
-# --------- Clients ----------
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ✅ API token for your own JSON APIs (/ask, /call)
+# Set in Render → Environment → API_TOKEN, and your iOS app sends: Authorization: Bearer <API_TOKEN>
+API_TOKEN = os.getenv("API_TOKEN", "")
 
-# --------- App ----------
+# ---------- Clients ----------
+client = OpenAI(api_key=OPENAI_API_KEY)
+twilio_client = (
+    TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN
+    else None
+)
+
+# ---------- App ----------
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
-@app.route("/whereami")
-def whereami():
-    # shows the exact public base URL Twilio/you should use
-    from flask import request
-    return {
-        "host": request.host,               # e.g., ai-secretary.onrender.com
-        "host_url": request.host_url,       # e.g., https://ai-secretary.onrender.com/
-        "url_root": request.url_root,       # same as above
-        "full_url_you_hit": request.url,    # includes path (/whereami)
-        "scheme": request.scheme            # http/https
-    }
-
-
-# --------- Helpers ----------
+# ---------- Helpers ----------
 def https_base() -> str:
-    """
-    Build an absolute HTTPS base URL for callbacks.
-    Works behind proxies/Render (Twilio requires https).
-    """
+    """Build an absolute HTTPS base URL for callbacks (Twilio requires https)."""
     proto = request.headers.get("X-Forwarded-Proto", "http")
     base = request.url_root
     if proto == "https" and base.startswith("http://"):
@@ -63,14 +62,10 @@ def ask_gpt(prompt: str) -> str:
         app.logger.exception("OpenAI error")
         return f"Sorry, I hit an error talking to ChatGPT: {e}"
 
-# ---- Twilio signature validation ----
 def is_valid_twilio_request(req) -> bool:
-    """
-    Verify that this request genuinely came from Twilio.
-    Twilio sends 'X-Twilio-Signature' for webhooks.
-    """
+    """Verify the webhook came from Twilio via signature header."""
     if SKIP_TWILIO_VALIDATION:
-        return True  # allow while you're testing; turn off in production
+        return True  # allow during manual curl tests only
 
     if not TWILIO_AUTH_TOKEN:
         app.logger.warning("TWILIO_AUTH_TOKEN not set; rejecting webhook.")
@@ -78,7 +73,6 @@ def is_valid_twilio_request(req) -> bool:
 
     signature = req.headers.get("X-Twilio-Signature", "")
     validator = RequestValidator(TWILIO_AUTH_TOKEN)
-    # Twilio signs full URL + POST params (GET will have no params)
     url = req.url
     params = dict(req.form) if req.method == "POST" else {}
     try:
@@ -87,13 +81,48 @@ def is_valid_twilio_request(req) -> bool:
         app.logger.exception("Twilio validation error: %r", e)
         return False
 
-# --------- Basic / diagnostics routes ----------
+# ✅ Bearer-token guard for /ask and /call
+def is_valid_api_request(req) -> bool:
+    """
+    Require Authorization: Bearer <API_TOKEN> for JSON APIs.
+    Purpose: prevent random internet access to /ask and /call.
+    """
+    if not API_TOKEN:
+        app.logger.error("API_TOKEN not set; denying API request.")
+        return False
+    return req.headers.get("Authorization", "") == f"Bearer {API_TOKEN}"
+
+def normalize_e164(num: str) -> str:
+    s = "".join(ch for ch in num if ch.isdigit() or ch == "+")
+    if s and s[0] != "+":
+        if len(s) == 10:  # naive US default
+            s = "+1" + s
+    return s
+
+# ---------- Diagnostics ----------
+@app.route("/whereami")
+def whereami():
+    return {
+        "host": request.host,
+        "host_url": request.host_url,
+        "url_root": request.url_root,
+        "full_url_you_hit": request.url,
+        "scheme": request.scheme,
+    }
+
+@app.route("/health", methods=["GET"])
+def health():
+    return "OK", 200
+
 @app.route("/")
 def home():
-    return "Flask + GPT is running. Try /ask?text=Hello"
+    return "Flask + GPT is running. Try /ask (Bearer token), /voice (Twilio), /voice-test."
 
+# ---------- JSON Ask (secured) ----------
 @app.route("/ask", methods=["GET", "POST"])
 def ask():
+    if not is_valid_api_request(request):
+        return make_response("Unauthorized", 401)
     text = (request.args.get("text") or "").strip() if request.method == "GET" else (
         (request.get_json(silent=True) or {}).get("text") or ""
     ).strip()
@@ -104,18 +133,49 @@ def ask():
     r.headers["Content-Type"] = "text/plain; charset=utf-8"
     return r
 
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
+# ---------- Outbound calls (secured) ----------
+@app.route("/call", methods=["POST"])
+def start_call():
+    if not is_valid_api_request(request):
+        return make_response("Unauthorized", 401)
 
-@app.route("/voice-test", methods=["GET", "POST"])
-def voice_test():
-    app.logger.info("VOICE-TEST hit: %s %s", request.method, request.url)
+    if not twilio_client or not TWILIO_NUMBER:
+        return make_response("Server missing Twilio creds (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_NUMBER).", 500)
+
+    data = request.get_json(silent=True) or {}
+    to_raw = (data.get("to") or "").strip()
+    to = normalize_e164(to_raw)
+    if not to or len(to) < 8:
+        return make_response("Provide JSON {'to':'+15558675309'} (E.164).", 400)
+
+    try:
+        call = twilio_client.calls.create(
+            to=to,
+            from_=TWILIO_NUMBER,
+            url=f"{https_base()}/outbound-answer",
+            method="POST",
+        )
+        return {"sid": call.sid}, 200
+    except Exception as e:
+        app.logger.exception("Twilio outbound call error")
+        return make_response(f"Twilio error: {e}", 500)
+
+@app.route("/outbound-answer", methods=["GET", "POST"])
+def outbound_answer():
     vr = VoiceResponse()
-    vr.say("Your Twilio webhook is connected. This is a test.")
+    gather = Gather(
+        input="speech",
+        action=f"{https_base()}/gather",
+        method="POST",
+        language="en-US",
+        speechTimeout="auto",
+    )
+    gather.say("Hi! What can I help you with?")
+    vr.append(gather)
+    vr.redirect(f"{https_base()}/voice")
     return twiml(vr)
 
-# --------- Twilio call flow ----------
+# ---------- Twilio inbound call flow ----------
 @app.route("/voice", methods=["GET", "POST"])
 def voice():
     app.logger.info("VOICE hit: %s %s", request.method, request.url)
@@ -143,6 +203,13 @@ def voice():
         app.logger.exception("ERROR in /voice")
         vr.say("I hit an application error. Please try again.")
         return twiml(vr)
+
+@app.route("/voice-test", methods=["GET", "POST"])
+def voice_test():
+    app.logger.info("VOICE-TEST hit: %s %s", request.method, request.url)
+    vr = VoiceResponse()
+    vr.say("Your Twilio webhook is connected. This is a test.")
+    return twiml(vr)
 
 @app.route("/gather", methods=["GET", "POST"])
 def gather():
@@ -189,9 +256,7 @@ def gather():
         vr.redirect(f"{https_base()}/voice")
         return twiml(vr)
 
-# --------- Main ----------
-# --------- Main ----------
+# ---------- Main ----------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))  # <-- use Render's PORT if present
+    port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
-
