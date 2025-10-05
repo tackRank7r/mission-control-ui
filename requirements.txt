@@ -3,17 +3,14 @@ gunicorn==22.0.0
 openai==1.44.0
 twilio==9.3.2
 python-dotenv==1.0.1
-
-# Let httpx bring a compatible httpcore; avoid pinning httpcore to 1.x
 httpx==0.27.2
 
-# WebSocket stack
 flask-sock==0.7.0
 gevent==24.2.1
 gevent-websocket==0.10.1
 
-# Optional / only if you truly use them:
+# Optional:
 boto3
-# If you’re not actually running a FastAPI service, remove these:
-fastapi==0.115.0
-uvicorn[standard]==0.30.6
+# Remove these unless you actually run an ASGI app:
+# fastapi==0.115.0
+# uvicorn[standard]==0.30.6
