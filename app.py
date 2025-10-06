@@ -3,62 +3,16 @@ import re
 import json
 import logging
 from datetime import datetime
-from flask import Flask, request, make_response
+
 from dotenv import load_dotenv
+from flask import Flask, request, make_response, jsonify
 from openai import OpenAI
+
 from twilio.twiml.voice_response import VoiceResponse, Gather
 from twilio.request_validator import RequestValidator
 from twilio.rest import Client as TwilioClient
 
-
-# --- 1) TOP OF app.py: add imports and env helpers (keep your existing imports) ---
-try:
-    from flask_sock import Sock
-except ImportError:
-    # If not installed yet, add it to requirements.txt and redeploy
-    raise
-
-# Reuse your existing bearer env var if you already have one.
-APP_BACKEND_BEARER = os.getenv("APP_BACKEND_BEARER", "")
-
-def _authorized(hdr: str | None) -> bool:
-    # If no bearer configured on server, allow; else exact match "Bearer <token>"
-    if not APP_BACKEND_BEARER:
-        return True
-    return hdr == f"Bearer {APP_BACKEND_BEARER}"
-
-# --- 2) AFTER you create your Flask app object ---
-# Example: app = Flask(__name__)
-sock = Sock(app)  # add alongside your existing app
-
-# --- 3) ADD the WebSocket endpoint (echo stub). Keep your existing routes untouched. ---
-@sock.route("/voice")
-def ws_voice(ws):
-    # The Authorization header is in the HTTP handshake headers:
-    auth = request.headers.get("Authorization", "")
-    if not _authorized(auth):
-        # Close with a small message; client will show an error.
-        ws.send(json.dumps({"type": "error", "error": "invalid_bearer"}))
-        ws.close()
-        return
-
-    # Let the iOS client know we’re live
-    ws.send(json.dumps({"type": "partial", "text": "Connected. Send PCM16k mono frames."}))
-
-    # Simple loop: echo counts for binary audio frames; echo text for JSON/control frames
-    while True:
-        msg = ws.receive()  # None on close
-        if msg is None:
-            break
-        if isinstance(msg, (bytes, bytearray)):
-            ws.send(json.dumps({"type": "final", "text": f"received {len(msg)} bytes"}))
-        else:
-            # If the client sends JSON as text, keep it simple and reflect it
-            ws.send(json.dumps({"type": "final", "text": f"text: {msg}"}))
-
-
-
-# ---------- Optional email: Twilio SendGrid ----------
+# ---- Optional email (SendGrid) ----
 try:
     from sendgrid import SendGridAPIClient
     from sendgrid.helpers.mail import Mail
@@ -66,8 +20,22 @@ try:
 except Exception:
     SENDGRID_AVAILABLE = False
 
-# ---------- Load .env FIRST (Render uses env vars) ----------
+# ---- WebSocket support ----
+try:
+    from flask_sock import Sock
+except ImportError:
+    raise ImportError(
+        "flask-sock is not installed. Add `flask-sock==0.7.0` "
+        "to requirements.txt and redeploy."
+    )
+
+# ---------- Load local .env (Render primarily uses dashboard env vars) ----------
 load_dotenv()
+
+# ---------- Flask app ----------
+app = Flask(__name__)
+app.logger.setLevel(logging.INFO)
+sock = Sock(app)
 
 # ---------- Secrets / Config ----------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -80,8 +48,8 @@ TWILIO_NUMBER      = os.getenv("TWILIO_NUMBER", "")
 # For temporary testing without Twilio signature validation, set to "true"
 SKIP_TWILIO_VALIDATION = os.getenv("SKIP_TWILIO_VALIDATION", "false").lower() == "true"
 
-# Securing your JSON APIs (/ask, /call)
-API_TOKEN = os.getenv("API_TOKEN", "")
+# Securing your JSON APIs (/ask, /call) — set both to the same value in Render
+SERVER_TOKEN = (os.getenv("APP_BACKEND_BEARER") or os.getenv("API_TOKEN") or "").strip()
 
 # Email notifications (fallbacks)
 SENDGRID_API_KEY   = os.getenv("SENDGRID_API_KEY", "")
@@ -115,9 +83,23 @@ CALL_NOTES = {}   # CallSid -> list of {"role": "user"/"assistant", "text": str}
 
 RESERVATION_SLOT_KEYS = ["party_size", "date", "time", "name", "callback_number"]
 
-# ---------- App ----------
-app = Flask(__name__)
-app.logger.setLevel(logging.INFO)
+# ---------- Auth helpers ----------
+import hmac
+
+def require_bearer():
+    """Return (json,status) on failure, or None on success."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return {"error": "missing_bearer"}, 401
+    client_token = auth.split(" ", 1)[1].strip()
+    if not SERVER_TOKEN or not hmac.compare_digest(client_token, SERVER_TOKEN):
+        return {"error": "invalid_bearer"}, 403
+    return None
+
+def is_valid_api_request(req):
+    """Back-compat helper for routes that used a bool check previously."""
+    err = require_bearer()
+    return (err is None), (None if err is None else err[0]["error"])
 
 # ---------- Helpers ----------
 def https_base() -> str:
@@ -158,12 +140,6 @@ def is_valid_twilio_request(req) -> bool:
     except Exception as e:
         app.logger.exception("Twilio validation error: %r", e)
         return False
-
-def is_valid_api_request(req) -> bool:
-    if not API_TOKEN:
-        app.logger.error("API_TOKEN not set; denying API request.")
-        return False
-    return req.headers.get("Authorization", "") == f"Bearer {API_TOKEN}"
 
 def normalize_e164(num: str) -> str:
     s = "".join(ch for ch in num if ch.isdigit() or ch == "+")
@@ -259,7 +235,7 @@ def fill_reservation_slots_from_text(slots: dict, text: str) -> dict:
         slots["name"] = m.group(1).title()
 
     # callback number
-    m = re.search(r"(\+?\d[\d\-\s\(\)]{7,}\d)", text)  # keep original (not lower)
+    m = re.search(r"(\+?\d[\d\-\s\(\)]{7,}\d)", text)  # keep original case
     if m and not slots.get("callback_number"):
         slots["callback_number"] = normalize_e164(m.group(1))
 
@@ -311,13 +287,16 @@ def home():
 # ---------- JSON Ask (secured) ----------
 @app.route("/ask", methods=["GET", "POST"])
 def ask():
-    if not is_valid_api_request(request):
-        return make_response("Unauthorized", 401)
+    maybe_err = require_bearer()
+    if maybe_err:
+        return maybe_err  # {"error": "..."} with 401/403
+
     text = (request.args.get("text") or "").strip() if request.method == "GET" else (
         (request.get_json(silent=True) or {}).get("text") or ""
     ).strip()
     if not text:
         return make_response("Provide text via ?text=... or JSON {'text':'...'}", 400)
+
     answer = ask_gpt(text)
     r = make_response(answer, 200)
     r.headers["Content-Type"] = "text/plain; charset=utf-8"
@@ -326,10 +305,14 @@ def ask():
 # ---------- Outbound calls (secured) ----------
 @app.route("/call", methods=["POST"])
 def start_call():
-    if not is_valid_api_request(request):
-        return make_response("Unauthorized", 401)
+    ok, err = is_valid_api_request(request)
+    if not ok:
+        code = 401 if err == "missing_bearer" else 403
+        return make_response(json.dumps({"error": err}), code)
+
     if not twilio_client or not TWILIO_NUMBER:
         return make_response("Server missing Twilio creds (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_NUMBER).", 500)
+
     data = request.get_json(silent=True) or {}
     to = normalize_e164((data.get("to") or "").strip())
     if not to or len(to) < 8:
@@ -513,8 +496,35 @@ def gather():
         vr.redirect(f"{https_base()}/voice")
         return twiml(vr)
 
+# ---------- WebSocket endpoint (secured) ----------
+@sock.route("/voice-ws")
+def voice_ws(ws):
+    # Auth during the HTTP->WS upgrade
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        ws.send(json.dumps({"type": "error", "error": "missing_bearer"}))
+        ws.close()
+        return
+    client_token = auth.split(" ", 1)[1].strip()
+    if not SERVER_TOKEN or not hmac.compare_digest(client_token, SERVER_TOKEN):
+        ws.send(json.dumps({"type": "error", "error": "invalid_bearer"}))
+        ws.close()
+        return
+
+    # Ready
+    ws.send(json.dumps({"type": "partial", "text": "Connected. Send PCM16k mono frames."}))
+
+    # Echo loop
+    while True:
+        msg = ws.receive()  # None on close
+        if msg is None:
+            break
+        if isinstance(msg, (bytes, bytearray)):
+            ws.send(json.dumps({"type": "final", "text": f"received {len(msg)} bytes"}))
+        else:
+            ws.send(json.dumps({"type": "final", "text": f"text: {msg}"}))
+
 # ---------- Main ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5000"))
     app.run(host="0.0.0.0", port=port)
-
