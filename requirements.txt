@@ -9,7 +9,7 @@ flask-sock==0.7.0
 gevent==24.2.1
 gevent-websocket==0.10.1
 
-# Optional:
+botocore
 boto3
 # Remove these unless you actually run an ASGI app:
 # fastapi==0.115.0
