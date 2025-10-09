@@ -1,17 +1,17 @@
 # file: render.yaml
 services:
-  - name: ai-secretary-backend
-    type: web
-    env: python
+  - type: web
+    name: CGPTPROJECT           # must match your existing service's name
+    runtime: python             # 'runtime' replaces 'env' in Blueprints
     plan: free
     buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn -b 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 120 app:app"
     healthCheckPath: "/health"
     envVars:
-      - key: PYTHON_VERSION
+      - key: PYTHON_VERSION     # Render-supported way to set Python version
         value: 3.12.5
       - key: APP_BACKEND_BEARER
-        sync: false
+        sync: false             # prompt on first Blueprint apply only
       - key: OPENAI_API_KEY
         sync: false
       - key: AWS_ACCESS_KEY_ID
@@ -20,3 +20,6 @@ services:
         sync: false
       - key: AWS_REGION
         value: us-east-1
+# Notes:
+# - 'sync: false' is ignored on updates; set secrets manually after initial apply.
+# - If your repo is a monorepo, add: rootDir: path/to/app
