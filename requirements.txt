@@ -1,6 +1,3 @@
-Flask==3.0.3
-gunicorn==22.0.0
-openai==1.44.0
 twilio==9.3.2
 python-dotenv==1.0.1
 httpx==0.27.2
@@ -9,8 +6,14 @@ flask-sock==0.7.0
 gevent==24.2.1
 gevent-websocket==0.10.1
 
-botocore
+# Optional:
 boto3
 # Remove these unless you actually run an ASGI app:
 # fastapi==0.115.0
 # uvicorn[standard]==0.30.6
+
+flask>=3.0.0
+gunicorn>=21.2.0
+boto3>=1.35.0
+botocore>=1.35.0
+openai>=1.35.0
