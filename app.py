@@ -241,6 +241,16 @@ def speak() -> Response:
     resp = make_response(audio)
     resp.headers["Content-Type"] = content_type or "application/octet-stream"
     return resp
+    
+@app.get("/")
+def index():
+    # why: some edges show 502 on bare root; serve a simple page instead
+    return (
+        "<h1>AI Secretary</h1>"
+        '<p>Service is running. Try <a href="/health">/health</a> or <a href="/diagnostics">/diagnostics</a>.</p>',
+        200,
+        {"Content-Type": "text/html; charset=utf-8"},
+    )
 
 
 # --- Local dev entrypoint ---
