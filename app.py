@@ -217,3 +217,33 @@ def __where() -> Response:
 @app.post("/ask")
 @require_bearer_token
 def ask() -> Response:
+    data = request.get_json(silent=True) or {}
+    prompt = str(data.get("prompt", "")).strip()
+    if not prompt:
+        return jsonify({"error": "missing_prompt"}), 400
+    reply = generate_ai_reply(prompt)
+    return jsonify({"reply": reply})
+
+
+@app.post("/speak")
+@require_bearer_token
+def speak() -> Response:
+    data = request.get_json(silent=True) or {}
+    text = str(data.get("text", "")).strip()
+    voice = str(data.get("voice", POLLY_VOICE_DEFAULT))
+    fmt = str(data.get("format", POLLY_FORMAT_DEFAULT))
+    engine = str(data.get("engine", POLLY_ENGINE_DEFAULT))
+
+    audio, content_type = synthesize_speech(text, voice=voice, fmt=fmt, engine=engine)
+    if not audio:
+        return jsonify({"error": "tts_failed"}), 500
+
+    resp = make_response(audio)
+    resp.headers["Content-Type"] = content_type or "application/octet-stream"
+    return resp
+
+
+# --- Local dev entrypoint ---
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port, debug=bool(os.getenv("FLASK_DEBUG")))
