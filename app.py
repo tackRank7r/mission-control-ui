@@ -1,530 +1,219 @@
-import os
-import re
-import json
+# file: app.py
+from __future__ import annotations
+
+import hashlib
+import hmac
 import logging
-from datetime import datetime
+import os
+import sys
+from functools import wraps
+from typing import Callable, Optional, Tuple
 
-from dotenv import load_dotenv
-from flask import Flask, request, make_response, jsonify
-from openai import OpenAI
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
+from flask import Flask, Response, jsonify, make_response, request
 
-from twilio.twiml.voice_response import VoiceResponse, Gather
-from twilio.request_validator import RequestValidator
-from twilio.rest import Client as TwilioClient
-
-# ---- Optional email (SendGrid) ----
+# Optional OpenAI for /ask
 try:
-    from sendgrid import SendGridAPIClient
-    from sendgrid.helpers.mail import Mail
-    SENDGRID_AVAILABLE = True
-except Exception:
-    SENDGRID_AVAILABLE = False
+    from openai import OpenAI  # openai>=1.x
+except Exception:  # pragma: no cover
+    OpenAI = None  # type: ignore
 
-# ---- WebSocket support ----
-try:
-    from flask_sock import Sock
-except ImportError:
-    raise ImportError(
-        "flask-sock is not installed. Add `flask-sock==0.7.0` "
-        "to requirements.txt and redeploy."
-    )
-
-# ---------- Load local .env (Render primarily uses dashboard env vars) ----------
-load_dotenv()
-
-# ---------- Flask app ----------
+# --- App setup ---
 app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
-sock = Sock(app)
+app.logger.warning(
+    "BOOT cwd=%s file=%s py=%s",
+    os.getcwd(),
+    __file__,
+    sys.version.split()[0],
+)
 
-# ---------- Secrets / Config ----------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+# --- Config ---
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+POLLY_VOICE_DEFAULT = os.getenv("POLLY_VOICE", "Joanna")
+POLLY_FORMAT_DEFAULT = os.getenv("POLLY_FORMAT", "mp3")  # mp3 | ogg_vorbis
+POLLY_ENGINE_DEFAULT = os.getenv("POLLY_ENGINE", "neural")
+TTS_CACHE_S3_BUCKET = os.getenv("TTS_CACHE_S3_BUCKET")
 
-# Twilio creds (signature validation + outbound calls)
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN  = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_NUMBER      = os.getenv("TWILIO_NUMBER", "")
+# Security (why: prevent public abuse)
+BACKEND_BEARER = os.getenv("APP_BACKEND_BEARER") or os.getenv("API_TOKEN")
 
-# For temporary testing without Twilio signature validation, set to "true"
-SKIP_TWILIO_VALIDATION = os.getenv("SKIP_TWILIO_VALIDATION", "false").lower() == "true"
+# --- AWS clients ---
+_session = boto3.session.Session(region_name=AWS_REGION)
+polly = _session.client("polly")
+s3 = _session.client("s3") if TTS_CACHE_S3_BUCKET else None
 
-# Securing your JSON APIs (/ask, /call) — set both to the same value in Render
-SERVER_TOKEN = (os.getenv("APP_BACKEND_BEARER") or os.getenv("API_TOKEN") or "").strip()
 
-# Email notifications (fallbacks)
-SENDGRID_API_KEY   = os.getenv("SENDGRID_API_KEY", "")
-ADMIN_EMAIL_FROM   = os.getenv("ADMIN_EMAIL_FROM", "")
-ADMIN_EMAIL_TO     = os.getenv("ADMIN_EMAIL_TO", "")
-ENABLE_EMAIL       = bool(SENDGRID_API_KEY and ADMIN_EMAIL_FROM and ADMIN_EMAIL_TO and SENDGRID_AVAILABLE)
-
-# Fallback heuristics
-MAX_TURNS_PER_CALL = int(os.getenv("MAX_TURNS_PER_CALL", "10"))
-FALLBACK_KEYWORDS  = [
-    "i don't understand", "i'm not sure", "can't help with that",
-    "i'm unable", "i cannot", "i can’t", "not able to handle"
-]
-
-# Logging (JSON lines)
-LOG_PATH = os.getenv("LOG_PATH", "/tmp/calls.jsonl")
-
-# ---------- Clients ----------
-client = OpenAI(api_key=OPENAI_API_KEY)
-twilio_client = (TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-                 if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN else None)
-
-# ---------- In-memory call state (OK for MVP; use Redis/DB later) ----------
-# CALL_STATE[CallSid] = {
-#   "intent": "reservation"|"qa"|None,
-#   "slots": { "party_size":None, "date":None, "time":None, "name":None, "callback_number":None },
-#   "turns": 0
-# }
-CALL_STATE = {}
-CALL_NOTES = {}   # CallSid -> list of {"role": "user"/"assistant", "text": str}
-
-RESERVATION_SLOT_KEYS = ["party_size", "date", "time", "name", "callback_number"]
-
-# ---------- Auth helpers ----------
-import hmac
-
-def require_bearer():
-    """Return (json,status) on failure, or None on success."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        return {"error": "missing_bearer"}, 401
-    client_token = auth.split(" ", 1)[1].strip()
-    if not SERVER_TOKEN or not hmac.compare_digest(client_token, SERVER_TOKEN):
-        return {"error": "invalid_bearer"}, 403
+# --- Auth ---
+def _extract_bearer(auth_header: Optional[str]) -> Optional[str]:
+    if not auth_header:
+        return None
+    parts = auth_header.split()
+    if len(parts) == 2 and parts[0].lower() == "bearer":
+        return parts[1]
     return None
 
-def is_valid_api_request(req):
-    """Back-compat helper for routes that used a bool check previously."""
-    err = require_bearer()
-    return (err is None), (None if err is None else err[0]["error"])
 
-# ---------- Helpers ----------
-def https_base() -> str:
-    proto = request.headers.get("X-Forwarded-Proto", "http")
-    base = request.url_root
-    if proto == "https" and base.startswith("http://"):
-        base = base.replace("http://", "https://", 1)
-    base = base.replace("http://", "https://", 1)
-    return base.rstrip("/")
+def require_bearer_token(fn: Callable):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not BACKEND_BEARER:
+            return jsonify({"error": "server_misconfigured_no_token"}), 500
+        token = _extract_bearer(request.headers.get("Authorization"))
+        if not token or not hmac.compare_digest(token, BACKEND_BEARER):
+            return jsonify({"error": "unauthorized"}), 401
+        return fn(*args, **kwargs)
 
-def twiml(vr: VoiceResponse):
-    return str(vr), 200, {"Content-Type": "text/xml"}
+    return wrapper
 
-def ask_gpt(prompt: str) -> str:
+
+# --- TTS helpers ---
+def _tts_cache_key(text: str, voice: str, fmt: str, engine: str) -> str:
+    h = hashlib.sha256()
+    h.update(voice.encode())
+    h.update(b"|")
+    h.update(fmt.encode())
+    h.update(b"|")
+    h.update(engine.encode())
+    h.update(b"|")
+    h.update(" ".join(text.split()).encode())  # normalize whitespace
+    ext = "mp3" if fmt == "mp3" else "ogg"
+    return f"tts/{voice}/{engine}/{h.hexdigest()}.{ext}"
+
+
+def _s3_get(bucket: str, key: str) -> Optional[bytes]:
+    if not s3:
+        return None
     try:
-        resp = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        return obj["Body"].read()
+    except (ClientError, BotoCoreError, KeyError):
+        return None
+
+
+def _s3_put(bucket: str, key: str, data: bytes, content_type: str) -> None:
+    if not s3:
+        return
+    try:
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
+            CacheControl="public, max-age=31536000, immutable",
         )
-        return resp.choices[0].message.content.strip()
-    except Exception as e:
-        app.logger.exception("OpenAI error")
-        return f"Sorry, I hit an error talking to ChatGPT: {e}"
+    except (ClientError, BotoCoreError) as e:
+        app.logger.warning("S3 cache put failed: %s", e)
 
-def is_valid_twilio_request(req) -> bool:
-    if SKIP_TWILIO_VALIDATION:
-        return True
-    if not TWILIO_AUTH_TOKEN:
-        app.logger.warning("TWILIO_AUTH_TOKEN not set; rejecting webhook.")
-        return False
-    signature = req.headers.get("X-Twilio-Signature", "")
-    validator = RequestValidator(TWILIO_AUTH_TOKEN)
-    url = req.url
-    params = dict(req.form) if req.method == "POST" else {}
-    try:
-        return validator.validate(url, params, signature)
-    except Exception as e:
-        app.logger.exception("Twilio validation error: %r", e)
-        return False
 
-def normalize_e164(num: str) -> str:
-    s = "".join(ch for ch in num if ch.isdigit() or ch == "+")
-    if s and s[0] != "+":
-        if len(s) == 10:  # naive US default
-            s = "+1" + s
-    return s
-
-def note_append(call_sid: str, role: str, text: str):
-    CALL_NOTES.setdefault(call_sid, []).append({"role": role, "text": text})
-
-def log_json(call_sid: str, role: str, text: str, intent: str | None, slots: dict | None):
-    try:
-        row = {
-            "ts": datetime.utcnow().isoformat() + "Z",
-            "call_sid": call_sid,
-            "role": role,
-            "text": text,
-            "intent": intent,
-            "slots": (slots or {}),
-        }
-        with open(LOG_PATH, "a") as f:
-            f.write(json.dumps(row, ensure_ascii=False) + "\n")
-    except Exception:
-        app.logger.exception("log_json failed")
-
-def send_email(subject: str, body: str) -> bool:
-    if not ENABLE_EMAIL:
-        app.logger.info("Email disabled or SendGrid not available.")
-        return False
-    try:
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-        message = Mail(
-            from_email=ADMIN_EMAIL_FROM,
-            to_emails=ADMIN_EMAIL_TO,
-            subject=subject,
-            plain_text_content=body,
-        )
-        sg.send(message)
-        return True
-    except Exception:
-        app.logger.exception("SendGrid email error")
-        return False
-
-def should_fallback(call_sid: str, assistant_text: str) -> bool:
-    turns = CALL_STATE.get(call_sid, {}).get("turns", 0)
-    if turns >= MAX_TURNS_PER_CALL:
-        return True
-    low = (assistant_text or "").lower()
-    return any(k in low for k in FALLBACK_KEYWORDS)
-
-# ---------- Intent & Reservation parsing ----------
-def detect_intent(user_text: str) -> str:
-    t = user_text.lower()
-    if any(w in t for w in ["reservation", "reserve", "book a table", "book", "table for"]):
-        return "reservation"
-    return "qa"
-
-def ensure_call_state(call_sid: str):
-    if call_sid not in CALL_STATE:
-        CALL_STATE[call_sid] = {
-            "intent": None,
-            "turns": 0,
-            "slots": {k: None for k in RESERVATION_SLOT_KEYS},
-        }
-
-def fill_reservation_slots_from_text(slots: dict, text: str) -> dict:
-    t = text.lower()
-
-    # party size
-    m = re.search(r"\b(?:for|party|table)\s*(\d{1,2})\b", t)
-    if m and not slots.get("party_size"):
-        slots["party_size"] = m.group(1)
-
-    # time (very naive)
-    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", t)
-    if m and not slots.get("time"):
-        hh = m.group(1)
-        mm = m.group(2) or "00"
-        ampm = m.group(3) or ""
-        slots["time"] = f"{hh}:{mm}{(' ' + ampm) if ampm else ''}".strip()
-
-    # date keywords (naive)
-    for kw in ["today", "tonight", "tomorrow", "mon", "tue", "wed", "thu", "fri", "sat", "sun",
-               "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]:
-        if kw in t and not slots.get("date"):
-            slots["date"] = kw
-            break
-
-    # name
-    m = re.search(r"\b(?:name(?: is)?|under)\s+([a-z]+(?:\s+[a-z]+)?)\b", t)
-    if m and not slots.get("name"):
-        slots["name"] = m.group(1).title()
-
-    # callback number
-    m = re.search(r"(\+?\d[\d\-\s\(\)]{7,}\d)", text)  # keep original case
-    if m and not slots.get("callback_number"):
-        slots["callback_number"] = normalize_e164(m.group(1))
-
-    return slots
-
-def reservation_missing_slots(slots: dict) -> list[str]:
-    return [k for k in RESERVATION_SLOT_KEYS if not slots.get(k)]
-
-def reservation_next_question(missing: list[str]) -> str:
-    order = RESERVATION_SLOT_KEYS
-    for k in order:
-        if k in missing:
-            if k == "party_size":
-                return "How many people is the reservation for?"
-            if k == "date":
-                return "What day would you like? For example, today, tomorrow, or a weekday."
-            if k == "time":
-                return "What time would you like the reservation?"
-            if k == "name":
-                return "What name should I put the reservation under?"
-            if k == "callback_number":
-                return "What is a callback phone number, with country code please?"
-    return "Could you provide more details?"
-
-def reservation_confirmation(slots: dict) -> str:
-    return (f"To confirm, I have a reservation for {slots['party_size']} "
-            f"on {slots['date']} at {slots['time']}, under {slots['name']}, "
-            f"callback number {slots['callback_number']}. Is that correct?")
-
-# ---------- Diagnostics ----------
-@app.route("/whereami")
-def whereami():
-    return {
-        "host": request.host,
-        "host_url": request.host_url,
-        "url_root": request.url_root,
-        "full_url_you_hit": request.url,
-        "scheme": request.scheme,
-    }
-
-@app.route("/health", methods=["GET"])
-def health():
-    return "OK", 200
-
-@app.route("/")
-def home():
-    return "Flask + GPT is running. Try /ask (Bearer token), /voice (Twilio), /voice-test."
-
-# ---------- JSON Ask (secured) ----------
-@app.route("/ask", methods=["GET", "POST"])
-def ask():
-    maybe_err = require_bearer()
-    if maybe_err:
-        return maybe_err  # {"error": "..."} with 401/403
-
-    text = (request.args.get("text") or "").strip() if request.method == "GET" else (
-        (request.get_json(silent=True) or {}).get("text") or ""
-    ).strip()
+def synthesize_speech(
+    text: str,
+    voice: str = POLLY_VOICE_DEFAULT,
+    fmt: str = POLLY_FORMAT_DEFAULT,
+    engine: str = POLLY_ENGINE_DEFAULT,
+) -> Tuple[Optional[bytes], Optional[str]]:
     if not text:
-        return make_response("Provide text via ?text=... or JSON {'text':'...'}", 400)
+        return None, None
 
-    answer = ask_gpt(text)
-    r = make_response(answer, 200)
-    r.headers["Content-Type"] = "text/plain; charset=utf-8"
-    return r
+    # Cache check
+    cache_key = None
+    if TTS_CACHE_S3_BUCKET:
+        cache_key = _tts_cache_key(text, voice, fmt, engine)
+        cached = _s3_get(TTS_CACHE_S3_BUCKET, cache_key)
+        if cached:
+            ct = "audio/mpeg" if fmt == "mp3" else "audio/ogg"
+            return cached, ct
 
-# ---------- Outbound calls (secured) ----------
-@app.route("/call", methods=["POST"])
-def start_call():
-    ok, err = is_valid_api_request(request)
-    if not ok:
-        code = 401 if err == "missing_bearer" else 403
-        return make_response(json.dumps({"error": err}), code)
-
-    if not twilio_client or not TWILIO_NUMBER:
-        return make_response("Server missing Twilio creds (TWILIO_ACCOUNT_SID/TWILIO_AUTH_TOKEN/TWILIO_NUMBER).", 500)
-
-    data = request.get_json(silent=True) or {}
-    to = normalize_e164((data.get("to") or "").strip())
-    if not to or len(to) < 8:
-        return make_response("Provide JSON {'to':'+15558675309'} (E.164).", 400)
     try:
-        call = twilio_client.calls.create(
-            to=to,
-            from_=TWILIO_NUMBER,
-            url=f"{https_base()}/outbound-answer",
-            method="POST",
+        resp = polly.synthesize_speech(
+            Text=text,
+            OutputFormat=fmt,
+            VoiceId=voice,
+            Engine=engine,
         )
-        return {"sid": call.sid}, 200
+        audio = resp["AudioStream"].read()
+        ct = "audio/mpeg" if fmt == "mp3" else "audio/ogg"
+        if TTS_CACHE_S3_BUCKET and cache_key and audio:
+            _s3_put(TTS_CACHE_S3_BUCKET, cache_key, audio, ct)
+        return audio, ct
+    except Exception as e:  # boundary
+        app.logger.exception("Polly error: %s", e)
+        return None, None
+
+
+# --- Utilities ---
+def _openai_client():
+    if OpenAI is None:
+        raise RuntimeError("openai package not available")
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    return OpenAI(api_key=key)
+
+
+def generate_ai_reply(prompt: str) -> str:
+    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    try:
+        client = _openai_client()
+        res = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a concise AI Secretary."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        return (res.choices[0].message.content or "").strip()
     except Exception as e:
-        app.logger.exception("Twilio outbound call error")
-        return make_response(f"Twilio error: {e}", 500)
+        app.logger.warning("OpenAI error: %s", e)
+        return "I'm here."
 
-@app.route("/outbound-answer", methods=["GET", "POST"])
-def outbound_answer():
-    vr = VoiceResponse()
-    gather = Gather(
-        input="speech",
-        action=f"{https_base()}/gather",
-        method="POST",
-        language="en-US",
-        speechTimeout="auto",
+
+# --- Routes (public JSON) ---
+@app.get("/health")
+def health() -> Response:
+    return jsonify(
+        {"ok": True, "service": "ai-secretary", "polly_region": AWS_REGION}
     )
-    gather.say("Hi! What can I help you with?")
-    vr.append(gather)
-    vr.redirect(f"{https_base()}/voice")
-    return twiml(vr)
 
-# ---------- Twilio inbound call flow ----------
-@app.route("/voice", methods=["GET", "POST"])
-def voice():
-    app.logger.info("VOICE hit: %s %s", request.method, request.url)
-    if not is_valid_twilio_request(request):
-        app.logger.warning("Invalid Twilio signature on /voice")
-        return "Forbidden", 403
-    vr = VoiceResponse()
-    try:
-        gather = Gather(
-            input="speech",
-            action=f"{https_base()}/gather",
-            method="POST",
-            language="en-US",
-            speechTimeout="auto",
-        )
-        gather.say("Hi! What can I help you with?")
-        vr.append(gather)
-        vr.redirect(f"{https_base()}/voice")
-        return twiml(vr)
-    except Exception:
-        app.logger.exception("ERROR in /voice")
-        vr.say("I hit an application error. Please try again.")
-        return twiml(vr)
 
-@app.route("/voice-test", methods=["GET", "POST"])
-def voice_test():
-    app.logger.info("VOICE-TEST hit: %s %s", request.method, request.url)
-    vr = VoiceResponse()
-    vr.say("Your Twilio webhook is connected. This is a test.")
-    return twiml(vr)
+@app.get("/diagnostics")
+def diagnostics() -> Response:
+    """Non-secret runtime health snapshot for ops debugging."""
+    import flask
+    import boto3 as boto3_pkg
+    return jsonify(
+        {
+            "python_version": sys.version.split()[0],
+            "flask_version": flask.__version__,
+            "boto3_version": boto3_pkg.__version__,
+            "aws_region": AWS_REGION,
+            "s3_cache_enabled": bool(TTS_CACHE_S3_BUCKET),
+            "env_flags": {
+                "APP_BACKEND_BEARER": bool(os.getenv("APP_BACKEND_BEARER")),
+                "OPENAI_API_KEY": bool(os.getenv("OPENAI_API_KEY")),
+                "AWS_ACCESS_KEY_ID": bool(os.getenv("AWS_ACCESS_KEY_ID")),
+                "AWS_SECRET_ACCESS_KEY": bool(os.getenv("AWS_SECRET_ACCESS_KEY")),
+                "TTS_CACHE_S3_BUCKET": bool(os.getenv("TTS_CACHE_S3_BUCKET")),
+            },
+        }
+    )
 
-# ---------- Core conversation loop with intent + slot filling ----------
-@app.route("/gather", methods=["GET", "POST"])
-def gather():
-    app.logger.info("GATHER hit: %s %s form=%s", request.method, request.url, dict(request.form))
-    if not is_valid_twilio_request(request):
-        app.logger.warning("Invalid Twilio signature on /gather")
-        return "Forbidden", 403
 
-    vr = VoiceResponse()
-    try:
-        if request.method == "GET":
-            vr.say("Let's try that again.")
-            vr.redirect(f"{https_base()}/voice")
-            return twiml(vr)
+@app.get("/__stamp")
+def __stamp() -> Response:
+    return jsonify(
+        {"commit": os.getenv("RENDER_GIT_COMMIT") or os.getenv("GIT_SHA") or "unknown"}
+    )
 
-        call_sid = request.form.get("CallSid", "unknown")
-        user_text = (request.form.get("SpeechResult") or "").strip()
-        app.logger.info("SpeechResult: %r (CallSid=%s)", user_text, call_sid)
 
-        ensure_call_state(call_sid)
-        state = CALL_STATE[call_sid]
-        state["turns"] += 1
-        note_append(call_sid, "user", user_text)
-        log_json(call_sid, "user", user_text, state.get("intent"), state.get("slots"))
+@app.get("/__where")
+def __where() -> Response:
+    return jsonify({"cwd": os.getcwd(), "__file__": __file__})
 
-        if not user_text:
-            vr.say("I didn't catch that. Please try again after the beep.")
-            vr.redirect(f"{https_base()}/voice")
-            return twiml(vr)
 
-        # --- Voice command: "call <number>" ---
-        m = re.search(r"(?:call|dial)\s+([+\d][\d\-\s\(\)]{6,})", user_text.lower())
-        if m:
-            number = normalize_e164(m.group(1))
-            if number and len(number) >= 8:
-                vr.say(f"Calling {number}.")
-                from_number = TWILIO_NUMBER or None
-                with vr.dial(caller_id=from_number) as d:
-                    d.number(number)
-                note_append(call_sid, "assistant", f"[dial] {number}")
-                log_json(call_sid, "assistant", f"[dial] {number}", state.get("intent"), state.get("slots"))
-                return twiml(vr)
-            vr.say("Please say the number with the country code, like plus one then the number.")
-            vr.redirect(f"{https_base()}/voice")
-            return twiml(vr)
-
-        # --- Intent detection (once) ---
-        if state["intent"] is None:
-            state["intent"] = detect_intent(user_text)
-
-        if state["intent"] == "reservation":
-            # Fill slots from current utterance
-            state["slots"] = fill_reservation_slots_from_text(state["slots"], user_text)
-            missing = reservation_missing_slots(state["slots"])
-
-            if not missing:
-                # All info present – confirm + email + end
-                confirm = reservation_confirmation(state["slots"])
-                vr.say(confirm)
-                note_append(call_sid, "assistant", confirm)
-                log_json(call_sid, "assistant", confirm, state["intent"], state["slots"])
-
-                summary = ("Reservation details:\n" +
-                           json.dumps(state["slots"], indent=2))
-                send_email(subject=f"Reservation request (Call {call_sid})",
-                           body=summary + "\n\n(Automated summary from AI Secretary)")
-
-                vr.say("Thanks. I’ll follow up by email to confirm next steps.")
-                return twiml(vr)
-
-            # Ask next missing slot
-            q = reservation_next_question(missing)
-            vr.say(q)
-            note_append(call_sid, "assistant", q)
-            log_json(call_sid, "assistant", q, state["intent"], state["slots"])
-
-            again = Gather(
-                input="speech",
-                action=f"{https_base()}/gather",
-                method="POST",
-                language="en-US",
-                speechTimeout="auto",
-            )
-            vr.append(again)
-            return twiml(vr)
-
-        # --- General Q&A fallback if not reservation ---
-        answer = ask_gpt(user_text)
-        note_append(call_sid, "assistant", answer)
-        log_json(call_sid, "assistant", answer, state["intent"], state["slots"])
-
-        if should_fallback(call_sid, answer):
-            vr.say("Thanks. I’m going to take notes and have my manager follow up by email.")
-            # Build a concise transcript
-            last = CALL_NOTES.get(call_sid, [])[-12:]
-            lines = [f"[{n['role']}] {n['text']}" for n in last]
-            send_email(subject=f"AI Secretary fallback (Call {call_sid})",
-                       body="Recent turns:\n" + "\n".join(lines))
-            vr.say("Goodbye.")
-            return twiml(vr)
-
-        vr.say(answer)
-        vr.pause(length=1)
-        vr.say("You can ask another question after the beep.")
-        again = Gather(
-            input="speech",
-            action=f"{https_base()}/gather",
-            method="POST",
-            language="en-US",
-            speechTimeout="auto",
-        )
-        vr.append(again)
-        return twiml(vr)
-
-    except Exception:
-        app.logger.exception("ERROR in /gather")
-        vr.say("I hit an application error while processing your speech. Please try again.")
-        vr.redirect(f"{https_base()}/voice")
-        return twiml(vr)
-
-# ---------- WebSocket endpoint (secured) ----------
-@sock.route("/voice-ws")
-def voice_ws(ws):
-    # Auth during the HTTP->WS upgrade
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        ws.send(json.dumps({"type": "error", "error": "missing_bearer"}))
-        ws.close()
-        return
-    client_token = auth.split(" ", 1)[1].strip()
-    if not SERVER_TOKEN or not hmac.compare_digest(client_token, SERVER_TOKEN):
-        ws.send(json.dumps({"type": "error", "error": "invalid_bearer"}))
-        ws.close()
-        return
-
-    # Ready
-    ws.send(json.dumps({"type": "partial", "text": "Connected. Send PCM16k mono frames."}))
-
-    # Echo loop
-    while True:
-        msg = ws.receive()  # None on close
-        if msg is None:
-            break
-        if isinstance(msg, (bytes, bytearray)):
-            ws.send(json.dumps({"type": "final", "text": f"received {len(msg)} bytes"}))
-        else:
-            ws.send(json.dumps({"type": "final", "text": f"text: {msg}"}))
-
-# ---------- Main ----------
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "5000"))
-    app.run(host="0.0.0.0", port=port)
+# --- Routes (auth required) ---
+@app.post("/ask")
+@require_bearer_token
+def ask() -> Response:
