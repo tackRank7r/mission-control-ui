@@ -8,6 +8,10 @@ import os
 import sys
 from functools import wraps
 from typing import Callable, Optional, Tuple
+# --- app.py additions (Twilio SMS + Voice) ---
+from twilio.twiml.messaging_response import MessagingResponse
+from twilio.twiml.voice_response import VoiceResponse
+import os
 
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
