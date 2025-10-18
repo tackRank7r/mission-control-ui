@@ -1,5 +1,4 @@
-
-# file: app.py  — NON-DESTRUCTIVE MERGE: keeps your features, adds /api/chat + optional Twilio voice
+# file: app.py  — Keeps your features, adds Twilio SMS + Polly audio playback + SSML + reply caching hook
 from __future__ import annotations
 
 import hashlib
@@ -20,13 +19,15 @@ try:
 except Exception:  # pragma: no cover
     OpenAI = None  # type: ignore
 
-# Optional Twilio (voice) — enabled only if installed
+# Optional Twilio (voice + SMS) — enabled only if installed
 try:
     from twilio.twiml.voice_response import VoiceResponse, Gather  # type: ignore
+    from twilio.twiml.messaging_response import MessagingResponse  # type: ignore
     _TWILIO_AVAILABLE = True
 except Exception:  # pragma: no cover
     VoiceResponse = None  # type: ignore
     Gather = None  # type: ignore
+    MessagingResponse = None  # type: ignore
     _TWILIO_AVAILABLE = False
 
 # --- App setup ---
@@ -44,7 +45,8 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 POLLY_VOICE_DEFAULT = os.getenv("POLLY_VOICE", "Joanna")
 POLLY_FORMAT_DEFAULT = os.getenv("POLLY_FORMAT", "mp3")  # mp3 | ogg_vorbis
 POLLY_ENGINE_DEFAULT = os.getenv("POLLY_ENGINE", "neural")
-TTS_CACHE_S3_BUCKET = os.getenv("TTS_CACHE_S3_BUCKET")
+TTS_CACHE_S3_BUCKET = os.getenv("TTS_CACHE_S3_BUCKET")       # make this public OR use CLOUDFRONT
+CLOUDFRONT_DOMAIN = os.getenv("CLOUDFRONT_DOMAIN")            # e.g., dxxxx.cloudfront.net (optional)
 
 # Security
 BACKEND_BEARER = os.getenv("APP_BACKEND_BEARER") or os.getenv("API_TOKEN")
@@ -84,12 +86,23 @@ def https_base() -> str:
     base = base.replace("http://", "https://", 1)
     return base.rstrip("/")
 
+# --- S3 public URL helper ---
+def s3_public_url(bucket: str, key: str) -> Optional[str]:
+    if not bucket or not key:
+        return None
+    if CLOUDFRONT_DOMAIN:  # prefer CloudFront if provided
+        # strip leading slash to avoid double slashes
+        k = key[1:] if key.startswith("/") else key
+        return f"https://{CLOUDFRONT_DOMAIN}/{k}"
+    return f"https://{bucket}.s3.amazonaws.com/{key}"
+
 # --- TTS helpers (AWS Polly) ---
-def _tts_cache_key(text: str, voice: str, fmt: str, engine: str) -> str:
+def _tts_cache_key(text: str, voice: str, fmt: str, engine: str, use_ssml: bool) -> str:
     h = hashlib.sha256()
     h.update(voice.encode()); h.update(b"|")
     h.update(fmt.encode());   h.update(b"|")
     h.update(engine.encode());h.update(b"|")
+    h.update(b"ssml" if use_ssml else b"plain"); h.update(b"|")
     h.update(" ".join(text.split()).encode())  # normalize whitespace
     ext = "mp3" if fmt == "mp3" else "ogg"
     return f"tts/{voice}/{engine}/{h.hexdigest()}.{ext}"
@@ -108,37 +121,79 @@ def _s3_put(bucket: str, key: str, data: bytes, content_type: str) -> None:
         return
     try:
         s3.put_object(
-            Bucket=bucket, Key=key, Body=data, ContentType=content_type,
+            Bucket=bucket,
+            Key=key,
+            Body=data,
+            ContentType=content_type,
             CacheControl="public, max-age=31536000, immutable",
         )
     except (ClientError, BotoCoreError) as e:
         app.logger.warning("S3 cache put failed: %s", e)
+
+def build_ssml(text: str) -> str:
+    """Light SSML for more natural prosody. Tweak as needed."""
+    safe = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return f"""<speak>
+  <prosody rate="medium" pitch="+0%">
+    {safe}
+  </prosody>
+</speak>"""
 
 def synthesize_speech(
     text: str,
     voice: str = POLLY_VOICE_DEFAULT,
     fmt: str = POLLY_FORMAT_DEFAULT,
     engine: str = POLLY_ENGINE_DEFAULT,
-) -> Tuple[Optional[bytes], Optional[str]]:
+    use_ssml: bool = True,
+) -> Tuple[Optional[bytes], Optional[str], Optional[str]]:
+    """
+    Returns: (audio_bytes, content_type, cache_key)
+    """
     if not text:
-        return None, None
+        return None, None, None
     cache_key = None
     if TTS_CACHE_S3_BUCKET:
-        cache_key = _tts_cache_key(text, voice, fmt, engine)
+        cache_key = _tts_cache_key(text, voice, fmt, engine, use_ssml)
         cached = _s3_get(TTS_CACHE_S3_BUCKET, cache_key)
         if cached:
             ct = "audio/mpeg" if fmt == "mp3" else "audio/ogg"
-            return cached, ct
+            return cached, ct, cache_key
     try:
-        resp = polly.synthesize_speech(Text=text, OutputFormat=fmt, VoiceId=voice, Engine=engine)
+        args = dict(
+            OutputFormat=fmt,
+            VoiceId=voice,
+            Engine=engine,
+        )
+        if use_ssml:
+            args["TextType"] = "ssml"
+            args["Text"] = build_ssml(text)
+        else:
+            args["Text"] = text
+
+        resp = polly.synthesize_speech(**args)
         audio = resp["AudioStream"].read()
         ct = "audio/mpeg" if fmt == "mp3" else "audio/ogg"
         if TTS_CACHE_S3_BUCKET and cache_key and audio:
             _s3_put(TTS_CACHE_S3_BUCKET, cache_key, audio, ct)
-        return audio, ct
+        return audio, ct, cache_key
     except Exception as e:  # boundary
         app.logger.exception("Polly error: %s", e)
-        return None, None
+        return None, None, None
+
+def ensure_tts_url(text: str) -> Optional[str]:
+    """
+    Ensures audio for `text` is available in S3 and returns a public URL.
+    """
+    # Try to read from cache first
+    if TTS_CACHE_S3_BUCKET:
+        key = _tts_cache_key(text, POLLY_VOICE_DEFAULT, POLLY_FORMAT_DEFAULT, POLLY_ENGINE_DEFAULT, True)
+        if _s3_get(TTS_CACHE_S3_BUCKET, key):
+            return s3_public_url(TTS_CACHE_S3_BUCKET, key)
+    # If not cached, synth and upload
+    audio, ct, key = synthesize_speech(text, use_ssml=True)
+    if audio and key and TTS_CACHE_S3_BUCKET:
+        return s3_public_url(TTS_CACHE_S3_BUCKET, key)
+    return None
 
 # --- OpenAI wrapper ---
 def _openai_client():
@@ -188,6 +243,7 @@ def diagnostics() -> Response:
                 "AWS_ACCESS_KEY_ID": bool(os.getenv("AWS_ACCESS_KEY_ID")),
                 "AWS_SECRET_ACCESS_KEY": bool(os.getenv("AWS_SECRET_ACCESS_KEY")),
                 "TTS_CACHE_S3_BUCKET": bool(os.getenv("TTS_CACHE_S3_BUCKET")),
+                "CLOUDFRONT_DOMAIN": bool(os.getenv("CLOUDFRONT_DOMAIN")),
             },
         }
     )
@@ -229,7 +285,7 @@ def speak() -> Response:
     fmt = str(data.get("format", POLLY_FORMAT_DEFAULT))
     engine = str(data.get("engine", POLLY_ENGINE_DEFAULT))
 
-    audio, content_type = synthesize_speech(text, voice=voice, fmt=fmt, engine=engine)
+    audio, content_type, _ = synthesize_speech(text, voice=voice, fmt=fmt, engine=engine, use_ssml=True)
     if not audio:
         return jsonify({"error": "tts_failed"}), 500
 
@@ -237,36 +293,28 @@ def speak() -> Response:
     resp.headers["Content-Type"] = content_type or "application/octet-stream"
     return resp
 
-# --- iOS chat endpoints (NEW; additive, not replacing anything) ---
+# --- iOS chat endpoints (additive) ---
 @app.get("/api/chat")
 def api_chat_ping() -> Response:
-    # why: used by the app’s “Test Backend” button
     return jsonify({"status": "ok", "path": "/api/chat", "method": "GET"})
 
 @app.post("/api/chat")
 @require_bearer_token
 def api_chat_post() -> Response:
-    """
-    Accepts: { messages: [{role,content,...}, ...], userText: str }
-    Returns: { reply: str }
-    """
     data = request.get_json(silent=True) or {}
     user_text = str(data.get("userText", "")).strip()
-
     if not user_text:
         msgs = data.get("messages") or []
         for m in reversed(msgs):
             if (m.get("role") == "user") and str(m.get("content", "")).strip():
                 user_text = str(m["content"]).strip()
                 break
-
     if not user_text:
         return jsonify({"error": "empty_user_text"}), 400
-
     reply = generate_ai_reply(user_text)
     return jsonify({"reply": reply})
 
-# --- Twilio Voice (OPTIONAL; enabled only if twilio is installed) ---
+# --- Twilio Voice + SMS (optional; enabled only if twilio is installed) ---
 if _TWILIO_AVAILABLE:
     @app.get("/voice")
     @app.post("/voice")
@@ -313,10 +361,16 @@ if _TWILIO_AVAILABLE:
                 return str(vr), 200, {"Content-Type": "text/xml"}
 
             answer = generate_ai_reply(user_text)
-            vr.say(answer)
-            vr.pause(length=1)
-            vr.say("You can ask another question after the beep.")
 
+            # Prefer high-quality Polly audio via S3/CloudFront
+            audio_url = ensure_tts_url(answer)
+            if audio_url:
+                vr.play(audio_url)
+            else:
+                vr.say(answer)  # fallback if TTS fails
+
+            # Keep dialog going:
+            vr.pause(length=1)
             again = Gather(
                 input="speech",
                 action=f"{https_base()}/gather",
@@ -324,13 +378,33 @@ if _TWILIO_AVAILABLE:
                 language="en-US",
                 speechTimeout="auto",
             )
+            again.say("You can ask another question after the beep.")
             vr.append(again)
             return str(vr), 200, {"Content-Type": "text/xml"}
+
         except Exception:
             app.logger.exception("ERROR in /gather")
             vr.say("I hit an application error while processing your speech. Please try again.")
             vr.redirect(f"{https_base()}/voice")
             return str(vr), 200, {"Content-Type": "text/xml"}
+
+    @app.post("/twilio/sms")
+    def twilio_sms() -> Response:
+        """
+        Twilio Messaging webhook → replies with AI answer (same brain).
+        Set in Twilio console: https://<your-host>/twilio/sms
+        """
+        body = (request.form.get("Body") or "").strip()
+        app.logger.info("SMS body: %r", body)
+        if not body:
+            resp = MessagingResponse()
+            resp.message("Say something and I'll reply 🙂")
+            return str(resp), 200, {"Content-Type": "application/xml"}
+        answer = generate_ai_reply(body)
+        resp = MessagingResponse()
+        resp.message(answer)
+        return str(resp), 200, {"Content-Type": "application/xml"}
+
 else:
     @app.get("/voice")
     @app.post("/voice")
@@ -340,6 +414,10 @@ else:
     @app.get("/gather")
     @app.post("/gather")
     def gather_unavailable() -> Response:
+        return make_response("Twilio not installed on this deployment.", 501)
+
+    @app.post("/twilio/sms")
+    def sms_unavailable() -> Response:
         return make_response("Twilio not installed on this deployment.", 501)
 
 # --- Main ---
