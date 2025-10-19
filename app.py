@@ -1,23 +1,19 @@
 # =====================================
 # File: app.py  (Render-ready Flask backend for Jarvis)
 # - Auth via APP_BACKEND_BEARER
-# - /health           : Render health check
-# - /diagnostics      : Flags for iOS DiagnosticsView
-# - /ask              : modern chat endpoint (demo echo; replace with LLM)
-# - /api/chat         : legacy-compatible chat endpoint
-# - /speak            : TTS (Polly -> OpenAI fallback), returns audio/mpeg
-# - /history          : sessions list with preview + preview_html (highlight)
-# - Minimal SQLAlchemy models for sessions/messages (sqlite or Postgres)
+# - /health, /diagnostics
+# - /ask (demo echo), /api/chat (legacy)
+# - /speak : TTS (Polly → OpenAI fallback), returns audio/mpeg
+# - /history : sessions list with preview + preview_html
 # =====================================
 import os
-import json
 from datetime import datetime
-from typing import Optional, Tuple
+from typing import Tuple
 
 from flask import Flask, jsonify, request, Response
 from flask_sqlalchemy import SQLAlchemy
 
-# Optional deps: boto3/OpenAI for TTS (gracefully degrade if missing)
+# Optional deps—installed per requirements.txt
 try:
     import boto3
     from botocore.exceptions import BotoCoreError, ClientError
@@ -30,27 +26,21 @@ try:
 except Exception:
     OpenAI = None
 
-# ---------------------------------
-# App / DB setup
-# ---------------------------------
 app = Flask(__name__)
 
-# Database URL (Render Postgres or local sqlite as fallback)
+# -------- DB --------
 DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgres://", "postgresql://")
 if not DATABASE_URL:
     DATABASE_URL = "sqlite:///jarvis.db"
 app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
 db = SQLAlchemy(app)
 
-# ---------------------------------
-# Environment / Config
-# ---------------------------------
-APP_BACKEND_BEARER = os.getenv("APP_BACKEND_BEARER", "")  # matches render.yaml
+# -------- Env / Auth --------
+APP_BACKEND_BEARER = os.getenv("APP_BACKEND_BEARER", "")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 POLLY_VOICE = os.getenv("POLLY_VOICE", "Matthew")
-POLLY_ENGINE = os.getenv("POLLY_ENGINE", "standard")  # set to "neural" only if supported
+POLLY_ENGINE = os.getenv("POLLY_ENGINE", "standard")  # use "neural" only if supported
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 def _auth_ok(req) -> bool:
@@ -59,16 +49,14 @@ def _auth_ok(req) -> bool:
     return req.headers.get("Authorization", "") == f"Bearer {APP_BACKEND_BEARER}"
 
 def require_bearer(fn):
-    def wrapper(*args, **kwargs):
+    def wrapper(*a, **kw):
         if not _auth_ok(request):
             return jsonify(error="unauthorized"), 401
-        return fn(*args, **kwargs)
+        return fn(*a, **kw)
     wrapper.__name__ = fn.__name__
     return wrapper
 
-# ---------------------------------
-# Minimal models (User/Session/Message)
-# ---------------------------------
+# -------- Models --------
 class User(db.Model):
     __tablename__ = "users"
     id   = db.Column(db.Integer, primary_key=True)
@@ -90,11 +78,9 @@ class ChatMessage(db.Model):
     content    = db.Column(db.Text, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
 
-# Create tables on boot if needed (okay for hobby deployments)
 with app.app_context():
     db.create_all()
 
-# Very small “current user” shim for demo; replace with auth as needed
 def current_user() -> User:
     u = User.query.first()
     if not u:
@@ -103,17 +89,14 @@ def current_user() -> User:
         db.session.commit()
     return u
 
-# Inject request.user when we need it
 def require_user(fn):
-    def wrapper(*args, **kwargs):
+    def wrapper(*a, **kw):
         request.user = current_user()  # type: ignore[attr-defined]
-        return fn(*args, **kwargs)
+        return fn(*a, **kw)
     wrapper.__name__ = fn.__name__
     return wrapper
 
-# ---------------------------------
-# Health / Diagnostics
-# ---------------------------------
+# -------- Health / Diagnostics --------
 @app.get("/health")
 def health():
     return jsonify(ok=True, ts=datetime.utcnow().isoformat() + "Z"), 200
@@ -135,9 +118,7 @@ def diagnostics():
     }
     return jsonify(ok=True, flags=flags), 200
 
-# ---------------------------------
-# Chat: modern + legacy
-# ---------------------------------
+# -------- Chat (modern + legacy) --------
 def _extract_user_text(body: dict) -> str:
     if "messages" in body and isinstance(body["messages"], list):
         last = body["messages"][-1]
@@ -158,10 +139,10 @@ def ask():
         if not user_text:
             return jsonify(error="empty_user_text"), 400
 
-        # TODO: Replace with your real LLM call. For now: echo.
+        # TODO: replace with real LLM call
         reply = f"You said: {user_text}"
 
-        # Persist a minimal session/message so /history has data
+        # persist minimal session/messages so /history works
         u = current_user()
         sess = ChatSession(user_id=u.id, title=user_text[:40] or "New chat")
         db.session.add(sess); db.session.commit()
@@ -196,7 +177,6 @@ def chat_legacy():
 
         reply = f"You said: {user_text}"
 
-        # Persist for history
         u = current_user()
         sess = ChatSession(user_id=u.id, title=user_text[:40] or "New chat")
         db.session.add(sess); db.session.commit()
@@ -209,9 +189,7 @@ def chat_legacy():
         app.logger.exception("legacy chat failed")
         return jsonify(error="server_error", detail=str(e)), 500
 
-# ---------------------------------
-# TTS: Polly -> OpenAI fallback
-# ---------------------------------
+# -------- TTS (Polly → OpenAI fallback) --------
 def _polly_tts(text: str) -> bytes:
     if not boto3 or not (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")):
         raise RuntimeError("polly_not_configured")
@@ -226,16 +204,42 @@ def _polly_tts(text: str) -> bytes:
     return stream.read()
 
 def _openai_tts(text: str) -> bytes:
+    """
+    Works with the modern OpenAI Python SDK.
+    No 'format' param here; SDK returns an object with .read() for bytes.
+    Try gpt-4o-mini-tts, then fall back to tts-1.
+    """
     if not OPENAI_API_KEY or not OpenAI:
         raise RuntimeError("openai_not_configured")
     client = OpenAI(api_key=OPENAI_API_KEY)
-    res = client.audio.speech.create(
-        model="gpt-4o-mini-tts",
-        voice="alloy",
-        input=text,
-        format="mp3",
-    )
-    return res.read()
+
+    # Try streaming API (fast path)
+    try:
+        with client.audio.speech.with_streaming_response.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=text,
+        ) as resp:
+            return resp.read()
+    except Exception:
+        pass
+
+    # Fallback non-streaming
+    try:
+        res = client.audio.speech.create(
+            model="gpt-4o-mini-tts",
+            voice="alloy",
+            input=text,
+        )
+        return res.read()
+    except Exception:
+        # Last resort: older model name
+        res = client.audio.speech.create(
+            model="tts-1",
+            voice="alloy",
+            input=text,
+        )
+        return res.read()
 
 @app.post("/speak")
 @require_bearer
@@ -263,9 +267,7 @@ def speak():
         app.logger.exception("speak endpoint error")
         return jsonify(error="server_error", detail=str(e)), 500
 
-# ---------------------------------
-# History: sessions list with preview_html highlight
-# ---------------------------------
+# -------- History (with preview_html highlight) --------
 @app.get("/history")
 @require_bearer
 @require_user
@@ -289,7 +291,6 @@ def list_sessions():
         end = min(len(text), i + len(query) + 40)
         snip = text[start:end]
         plain = ("…" if start > 0 else "") + snip + ("…" if end < len(text) else "")
-        # Safely highlight the original case of the match range
         match = text[i:i+len(query)]
         html = plain.replace(match, f"<mark>{match}</mark>", 1)
         return plain[:width], html[:width]
@@ -324,8 +325,6 @@ def list_sessions():
     has_more = (page * limit) < total
     return jsonify({"items": out, "page": page, "has_more": has_more})
 
-# ---------------------------------
-# Entry (Render uses gunicorn: web -> app:app)
-# ---------------------------------
+# -------- Entry --------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
