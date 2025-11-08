@@ -1,19 +1,27 @@
 # =====================================
 # File: app.py  (Render-ready Flask backend for Jarvis)
-# - Auth via APP_BACKEND_BEARER
-# - /health, /diagnostics
-# - /ask (demo echo), /api/chat (legacy)
-# - /speak : TTS (Polly → OpenAI fallback), returns audio/mpeg
-# - /history : sessions list with preview + preview_html
+# Purpose:
+#   - Auth via APP_BACKEND_BEARER
+#   - /health, /diagnostics
+#   - /ask -> real OpenAI reply (echo fallback)
+#   - /api/chat (legacy compat)
+#   - /speak -> TTS (Polly → OpenAI fallback)  audio/mpeg
+#   - /history -> sessions with preview + preview_html
+#   - (Optional) Twilio: /twilio/token and /voice TwiML if env is present
+# Notes:
+#   - Works on Render with Postgres via DATABASE_URL or falls back to SQLite.
+#   - Gunicorn entrypoint:  app:app
 # =====================================
+
 import os
 from datetime import datetime
+from functools import wraps
 from typing import Tuple
 
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, abort
 from flask_sqlalchemy import SQLAlchemy
 
-# Optional deps—installed per requirements.txt
+# ---------- Optional deps (graceful if absent) ----------
 try:
     import boto3
     from botocore.exceptions import BotoCoreError, ClientError
@@ -26,37 +34,61 @@ try:
 except Exception:
     OpenAI = None
 
+try:
+    from twilio.jwt.access_token import AccessToken
+    from twilio.jwt.access_token.grants import VoiceGrant
+    from twilio.twiml.voice_response import VoiceResponse, Dial, Number
+    from twilio.request_validator import RequestValidator
+except Exception:
+    AccessToken = VoiceGrant = VoiceResponse = Dial = Number = RequestValidator = None  # type: ignore
+
+# ---------- App / DB ----------
 app = Flask(__name__)
 
-# -------- DB --------
 DATABASE_URL = os.getenv("DATABASE_URL", "").replace("postgres://", "postgresql://")
 if not DATABASE_URL:
     DATABASE_URL = "sqlite:///jarvis.db"
-app.config["SQLALCHEMY_DATABASE_URI"] = DATABASE_URL
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+app.config.update(
+    SQLALCHEMY_DATABASE_URI=DATABASE_URL,
+    SQLALCHEMY_TRACK_MODIFICATIONS=False,
+    JSON_SORT_KEYS=False,
+)
+
 db = SQLAlchemy(app)
 
-# -------- Env / Auth --------
+# ---------- Env / Auth ----------
 APP_BACKEND_BEARER = os.getenv("APP_BACKEND_BEARER", "")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-POLLY_VOICE = os.getenv("POLLY_VOICE", "Matthew")
-POLLY_ENGINE = os.getenv("POLLY_ENGINE", "standard")  # use "neural" only if supported
+
+# OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+
+# Polly
+AWS_REGION   = os.getenv("AWS_REGION", "us-east-1")
+POLLY_VOICE  = os.getenv("POLLY_VOICE", "Matthew")
+POLLY_ENGINE = os.getenv("POLLY_ENGINE", "standard")  # "neural" if supported
+
+# Twilio (optional)
+TWILIO_ACCOUNT_SID   = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_API_KEY_SID   = os.getenv("TWILIO_API_KEY_SID", "")
+TWILIO_API_KEY_SECRET= os.getenv("TWILIO_API_KEY_SECRET", "")
+TWIML_APP_SID        = os.getenv("TWIML_APP_SID", "")
+TWILIO_AUTH_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN", "")
+TWILIO_CALLER_ID     = os.getenv("TWILIO_CALLER_ID", "")   # E.164 +1...
 
 def _auth_ok(req) -> bool:
     if not APP_BACKEND_BEARER:
-        return True
+        return True  # permissive if not set
     return req.headers.get("Authorization", "") == f"Bearer {APP_BACKEND_BEARER}"
 
 def require_bearer(fn):
+    @wraps(fn)
     def wrapper(*a, **kw):
         if not _auth_ok(request):
             return jsonify(error="unauthorized"), 401
         return fn(*a, **kw)
-    wrapper.__name__ = fn.__name__
     return wrapper
 
-# -------- Models --------
+# ---------- Models ----------
 class User(db.Model):
     __tablename__ = "users"
     id   = db.Column(db.Integer, primary_key=True)
@@ -81,6 +113,13 @@ class ChatMessage(db.Model):
 with app.app_context():
     db.create_all()
 
+@app.teardown_appcontext
+def shutdown_session(exception=None):
+    try:
+        db.session.remove()
+    except Exception:
+        pass
+
 def current_user() -> User:
     u = User.query.first()
     if not u:
@@ -90,35 +129,13 @@ def current_user() -> User:
     return u
 
 def require_user(fn):
+    @wraps(fn)
     def wrapper(*a, **kw):
         request.user = current_user()  # type: ignore[attr-defined]
         return fn(*a, **kw)
-    wrapper.__name__ = fn.__name__
     return wrapper
 
-# -------- Health / Diagnostics --------
-@app.get("/health")
-def health():
-    return jsonify(ok=True, ts=datetime.utcnow().isoformat() + "Z"), 200
-
-@app.get("/diagnostics")
-@require_bearer
-def diagnostics():
-    flags = {
-        "has_backend_bearer": bool(APP_BACKEND_BEARER),
-        "has_openai": bool(OPENAI_API_KEY),
-        "has_aws_keys": bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")),
-        "use_s3_cache": False,
-        "aws_region": AWS_REGION,
-        "polly_voice": POLLY_VOICE,
-        "polly_format": "mp3",
-        "polly_engine": POLLY_ENGINE,
-        "tts_provider_env": "polly" if os.getenv("AWS_ACCESS_KEY_ID") else ("openai" if OPENAI_API_KEY else "none"),
-        "tts_provider_effective": "polly" if os.getenv("AWS_ACCESS_KEY_ID") else ("openai" if OPENAI_API_KEY else "none"),
-    }
-    return jsonify(ok=True, flags=flags), 200
-
-# -------- Chat (modern + legacy) --------
+# ---------- Helpers ----------
 def _extract_user_text(body: dict) -> str:
     if "messages" in body and isinstance(body["messages"], list):
         last = body["messages"][-1]
@@ -130,6 +147,33 @@ def _extract_user_text(body: dict) -> str:
             return v.strip()
     return ""
 
+def _openai_client() -> OpenAI | None:
+    if not OPENAI_API_KEY or not OpenAI:
+        return None
+    return OpenAI(api_key=OPENAI_API_KEY)
+
+# ---------- Health / Diagnostics ----------
+@app.get("/health")
+def health():
+    return jsonify(ok=True, ts=datetime.utcnow().isoformat() + "Z"), 200
+
+@app.get("/diagnostics")
+@require_bearer
+def diagnostics():
+    flags = {
+        "has_backend_bearer": bool(APP_BACKEND_BEARER),
+        "has_openai": bool(OPENAI_API_KEY),
+        "has_aws_keys": bool(os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")),
+        "aws_region": AWS_REGION,
+        "polly_voice": POLLY_VOICE,
+        "polly_engine": POLLY_ENGINE,
+        "tts_provider_env": "polly" if os.getenv("AWS_ACCESS_KEY_ID") else ("openai" if OPENAI_API_KEY else "none"),
+        "twilio_enabled": all([TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, TWIML_APP_SID]),
+        "db_url": ("postgres" if DATABASE_URL.startswith("postgres") else "sqlite"),
+    }
+    return jsonify(ok=True, flags=flags), 200
+
+# ---------- Chat (modern + legacy) ----------
 @app.post("/ask")
 @require_bearer
 def ask():
@@ -139,12 +183,26 @@ def ask():
         if not user_text:
             return jsonify(error="empty_user_text"), 400
 
-        # TODO: replace with real LLM call
-        reply = f"You said: {user_text}"
+        # Prefer real OpenAI, fall back to echo if not configured
+        client = _openai_client()
+        reply = None
+        if client:
+            try:
+                r = client.chat.completions.create(
+                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                    messages=[{"role": "user", "content": user_text}],
+                    temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
+                )
+                reply = r.choices[0].message.content
+            except Exception as e:
+                app.logger.warning(f"OpenAI chat fallback due to error: {e}")
+
+        if not reply:
+            reply = f"You said: {user_text}"
 
         # persist minimal session/messages so /history works
         u = current_user()
-        sess = ChatSession(user_id=u.id, title=user_text[:40] or "New chat")
+        sess = ChatSession(user_id=u.id, title=user_text[:60] or "New chat")
         db.session.add(sess); db.session.commit()
         db.session.add(ChatMessage(session_id=sess.id, role="user", content=user_text))
         db.session.add(ChatMessage(session_id=sess.id, role="assistant", content=reply))
@@ -175,10 +233,25 @@ def chat_legacy():
         if not user_text:
             return jsonify(error="empty_user_text"), 400
 
-        reply = f"You said: {user_text}"
+        # Same behavior as /ask
+        client = _openai_client()
+        reply = None
+        if client:
+            try:
+                r = client.chat.completions.create(
+                    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+                    messages=[{"role": "user", "content": user_text}],
+                    temperature=float(os.getenv("OPENAI_TEMPERATURE", "0.7")),
+                )
+                reply = r.choices[0].message.content
+            except Exception as e:
+                app.logger.warning(f"OpenAI chat fallback due to error: {e}")
+
+        if not reply:
+            reply = f"You said: {user_text}"
 
         u = current_user()
-        sess = ChatSession(user_id=u.id, title=user_text[:40] or "New chat")
+        sess = ChatSession(user_id=u.id, title=user_text[:60] or "New chat")
         db.session.add(sess); db.session.commit()
         db.session.add(ChatMessage(session_id=sess.id, role="user", content=user_text))
         db.session.add(ChatMessage(session_id=sess.id, role="assistant", content=reply))
@@ -189,7 +262,7 @@ def chat_legacy():
         app.logger.exception("legacy chat failed")
         return jsonify(error="server_error", detail=str(e)), 500
 
-# -------- TTS (Polly → OpenAI fallback) --------
+# ---------- TTS (Polly → OpenAI fallback) ----------
 def _polly_tts(text: str) -> bytes:
     if not boto3 or not (os.getenv("AWS_ACCESS_KEY_ID") and os.getenv("AWS_SECRET_ACCESS_KEY")):
         raise RuntimeError("polly_not_configured")
@@ -205,19 +278,18 @@ def _polly_tts(text: str) -> bytes:
 
 def _openai_tts(text: str) -> bytes:
     """
-    Works with the modern OpenAI Python SDK.
-    No 'format' param here; SDK returns an object with .read() for bytes.
-    Try gpt-4o-mini-tts, then fall back to tts-1.
+    Modern OpenAI Python SDK. Returns raw mp3 bytes.
+    Tries gpt-4o-mini-tts, falls back to tts-1.
     """
-    if not OPENAI_API_KEY or not OpenAI:
+    client = _openai_client()
+    if not client:
         raise RuntimeError("openai_not_configured")
-    client = OpenAI(api_key=OPENAI_API_KEY)
 
     # Try streaming API (fast path)
     try:
         with client.audio.speech.with_streaming_response.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
+            model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
+            voice=os.getenv("OPENAI_TTS_VOICE", "alloy"),
             input=text,
         ) as resp:
             return resp.read()
@@ -227,8 +299,8 @@ def _openai_tts(text: str) -> bytes:
     # Fallback non-streaming
     try:
         res = client.audio.speech.create(
-            model="gpt-4o-mini-tts",
-            voice="alloy",
+            model=os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts"),
+            voice=os.getenv("OPENAI_TTS_VOICE", "alloy"),
             input=text,
         )
         return res.read()
@@ -236,7 +308,7 @@ def _openai_tts(text: str) -> bytes:
         # Last resort: older model name
         res = client.audio.speech.create(
             model="tts-1",
-            voice="alloy",
+            voice=os.getenv("OPENAI_TTS_VOICE", "alloy"),
             input=text,
         )
         return res.read()
@@ -267,15 +339,15 @@ def speak():
         app.logger.exception("speak endpoint error")
         return jsonify(error="server_error", detail=str(e)), 500
 
-# -------- History (with preview_html highlight) --------
+# ---------- History (with preview_html) ----------
 @app.get("/history")
 @require_bearer
 @require_user
 def list_sessions():
     u = request.user  # type: ignore[attr-defined]
-    page = max(int(request.args.get("page", 1)), 1)
+    page  = max(int(request.args.get("page", 1)), 1)
     limit = max(min(int(request.args.get("limit", 25)), 100), 1)
-    q = (request.args.get("q") or "").strip()
+    q     = (request.args.get("q") or "").strip()
 
     def highlight_snippet(text: str, query: str, width: int = 140) -> Tuple[str, str]:
         if not query:
@@ -288,14 +360,15 @@ def list_sessions():
             snip = text[:width]
             return snip, snip
         start = max(0, i - 40)
-        end = min(len(text), i + len(query) + 40)
-        snip = text[start:end]
+        end   = min(len(text), i + len(query) + 40)
+        snip  = text[start:end]
         plain = ("…" if start > 0 else "") + snip + ("…" if end < len(text) else "")
         match = text[i:i+len(query)]
-        html = plain.replace(match, f"<mark>{match}</mark>", 1)
+        html  = plain.replace(match, f"<mark>{match}</mark>", 1)
         return plain[:width], html[:width]
 
     base_q = ChatSession.query.filter_by(user_id=u.id, archived=False)
+
     if q:
         from sqlalchemy import or_
         base_q = (base_q.join(ChatMessage, ChatMessage.session_id == ChatSession.id)
@@ -304,8 +377,8 @@ def list_sessions():
                   .distinct())
 
     base_q = base_q.order_by(ChatSession.created_at.desc())
-    total = base_q.count()
-    items = base_q.offset((page-1)*limit).limit(limit).all()
+    total  = base_q.count()
+    items  = base_q.offset((page-1)*limit).limit(limit).all()
 
     out = []
     for sess in items:
@@ -325,6 +398,43 @@ def list_sessions():
     has_more = (page * limit) < total
     return jsonify({"items": out, "page": page, "has_more": has_more})
 
-# -------- Entry --------
+# ---------- Optional Twilio endpoints ----------
+def _twilio_enabled() -> bool:
+    return all([AccessToken, VoiceGrant, VoiceResponse, Dial, Number]) and \
+           all([TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, TWIML_APP_SID])
+
+@app.get("/twilio/token")
+@require_bearer
+def twilio_token():
+    if not _twilio_enabled():
+        return jsonify(error="twilio_not_configured"), 501
+    identity = request.args.get("identity", "ios-user")
+    token = AccessToken(TWILIO_ACCOUNT_SID, TWILIO_API_KEY_SID, TWILIO_API_KEY_SECRET, identity=identity)
+    grant = VoiceGrant(outgoing_application_sid=TWIML_APP_SID)
+    token.add_grant(grant)
+    return jsonify({"token": token.to_jwt().decode("utf-8")})
+
+@app.post("/voice")
+def voice():
+    # Optional: validate Twilio signature if token present
+    if TWILIO_AUTH_TOKEN and RequestValidator:
+        validator = RequestValidator(TWILIO_AUTH_TOKEN)
+        signature = request.headers.get("X-Twilio-Signature", "")
+        url = request.url
+        params = request.form.to_dict()
+        if not validator.validate(url, params, signature):
+            abort(403)
+
+    vr = VoiceResponse()
+    to_num = request.values.get("To")
+    if to_num:
+        dial = Dial(caller_id=TWILIO_CALLER_ID or request.values.get("From") or "")
+        dial.number(Number(to_num))
+        vr.append(dial)
+    else:
+        vr.say("Thanks for calling. Please provide a number.")
+    return str(vr), 200, {"Content-Type": "application/xml"}
+
+# ---------- Entry ----------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
