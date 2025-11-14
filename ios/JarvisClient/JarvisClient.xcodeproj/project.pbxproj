@@ -24,14 +24,28 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
-		F75E674C2E5BCEE9007FC145 /* JarvisClient.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = JarvisClient.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F75E674C2E5BCEE9007FC145 /* JarvisClient
+.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "JarvisClient\n.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F75E675B2E5BCEEB007FC145 /* JarvisClientTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JarvisClientTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		F75E67652E5BCEEB007FC145 /* JarvisClientUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JarvisClientUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		D57F975B2EBEEB27005E60A3 /* Exceptions for "JarvisClient" folder in "JarvisClient" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = F75E674B2E5BCEE9007FC145 /* JarvisClient */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		F75E674E2E5BCEE9007FC145 /* JarvisClient */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				D57F975B2EBEEB27005E60A3 /* Exceptions for "JarvisClient" folder in "JarvisClient" target */,
+			);
 			path = JarvisClient;
 			sourceTree = "<group>";
 		};
@@ -85,7 +99,8 @@
 		F75E674D2E5BCEE9007FC145 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				F75E674C2E5BCEE9007FC145 /* JarvisClient.app */,
+				F75E674C2E5BCEE9007FC145 /* JarvisClient
+.app */,
 				F75E675B2E5BCEEB007FC145 /* JarvisClientTests.xctest */,
 				F75E67652E5BCEEB007FC145 /* JarvisClientUITests.xctest */,
 			);
@@ -114,7 +129,8 @@
 			packageProductDependencies = (
 			);
 			productName = JarvisClient;
-			productReference = F75E674C2E5BCEE9007FC145 /* JarvisClient.app */;
+			productReference = F75E674C2E5BCEE9007FC145 /* JarvisClient
+.app */;
 			productType = "com.apple.product-type.application";
 		};
 		F75E675A2E5BCEEB007FC145 /* JarvisClientTests */ = {
@@ -402,7 +418,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = BH5H4LS7X5;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = JarvisClient/Info.plist;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = ": Needed to record/send audio.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Used to transcribe audio.";
@@ -414,12 +430,13 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
+					"@loader_path/Frameworks",
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.Snowman.identifier.JarvisClient;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "JarvisClient\n";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_OBJC_BRIDGING_HEADER = "JarvisClient/JarvisClient-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
@@ -439,7 +456,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = BH5H4LS7X5;
 				ENABLE_PREVIEWS = YES;
-				GENERATE_INFOPLIST_FILE = YES;
+				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = JarvisClient/Info.plist;
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = ": Needed to record/send audio.";
 				INFOPLIST_KEY_NSSpeechRecognitionUsageDescription = "Used to transcribe audio.";
@@ -451,12 +468,13 @@
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
+					"@loader_path/Frameworks",
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.Snowman.identifier.JarvisClient;
-				PRODUCT_NAME = "$(TARGET_NAME)";
+				PRODUCT_NAME = "JarvisClient\n";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_OBJC_BRIDGING_HEADER = "JarvisClient/JarvisClient-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
