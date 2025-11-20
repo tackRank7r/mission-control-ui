@@ -1,19 +1,13 @@
 # File: app.py
 # Action: REPLACE entire file
-#
-# Purpose:
-# - FastAPI backend for starting Twilio calls and emailing OpenAI summaries.
-# - /health: simple health probe (never crashes even if Twilio config is missing).
-# - /diagnostics: returns Twilio caller ID and config info for the iOS “View phone number” screen.
-# - /calls/start: called by iOS CallService to start an outbound Twilio call.
-# - /twilio/recording-complete: Twilio webhook to process recording → OpenAI → email summary.
+# Purpose: FastAPI backend for chat, starting Twilio calls, and emailing summaries.
 
 import os
 import io
 import smtplib
 from email.message import EmailMessage
-from typing import Optional
-from urllib.parse import quote
+from typing import Optional, List, Dict
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from fastapi.responses import PlainTextResponse, JSONResponse
@@ -22,9 +16,9 @@ from twilio.rest import Client as TwilioClient
 import httpx
 from openai import OpenAI
 
-# =========================================================
-# Configuration from environment
-# =========================================================
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
@@ -39,82 +33,126 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 
-# Twilio config check – but DO NOT crash the whole app if missing.
-MISSING_TWILIO_CONFIG = []
-if not TWILIO_ACCOUNT_SID:
-    MISSING_TWILIO_CONFIG.append("TWILIO_ACCOUNT_SID")
-if not TWILIO_AUTH_TOKEN:
-    MISSING_TWILIO_CONFIG.append("TWILIO_AUTH_TOKEN")
-if not TWILIO_CALLER_ID:
-    MISSING_TWILIO_CONFIG.append("TWILIO_CALLER_ID")
+MISSING_TWILIO = not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_CALLER_ID)
 
-TWILIO_CONFIG_OK = len(MISSING_TWILIO_CONFIG) == 0
-PUBLIC_URL_CONFIG_OK = bool(PUBLIC_BASE_URL)
+if not PUBLIC_BASE_URL:
+    raise RuntimeError("PUBLIC_BASE_URL must be set so Twilio can reach your webhooks.")
 
-# =========================================================
+# ---------------------------------------------------------------------------
 # Clients
-# =========================================================
+# ---------------------------------------------------------------------------
 
-twilio_client = TwilioClient(TWILIO_ACCOUNT_SID or None, TWILIO_AUTH_TOKEN or None)
+if MISSING_TWILIO:
+    twilio_client: Optional[TwilioClient] = None
+else:
+    twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
 openai_client = OpenAI()
 
-app = FastAPI(title="SideKick360 Call Orchestrator")
+app = FastAPI(title="SideKick360 Orchestrator")
 
-# =========================================================
-# Health + diagnostics
-# =========================================================
+# ---------------------------------------------------------------------------
+# Health & metadata
+# ---------------------------------------------------------------------------
 
-@app.get("/health")
-async def health() -> dict:
+@app.get("/health", response_class=PlainTextResponse)
+async def health() -> str:
     """
-    Lightweight health check used by Render and the iOS app.
-    Never raises, even if env vars are missing.
+    Simple health-check used by Render and the iOS client.
+    Returns plain text 'ok' on success.
     """
-    return {
-        "status": "ok",
-        "twilioConfigured": TWILIO_CONFIG_OK,
-        "publicBaseUrlConfigured": PUBLIC_URL_CONFIG_OK,
-    }
+    return "ok"
 
 
-@app.get("/diagnostics")
-async def diagnostics() -> JSONResponse:
+@app.get("/meta/phone-number")
+async def meta_phone_number():
     """
-    Returns basic configuration info, including the Twilio caller ID.
-    The iOS 'View phone number' screen hits this endpoint.
+    Returns the Twilio caller ID that the backend will use for outbound calls.
+    The iOS “View phone number” screen can hit this.
     """
-    # Light masking for safety if you ever show this outside development.
-    def mask_sid(s: str) -> str:
-        if not s:
-            return ""
-        if len(s) <= 8:
-            return s
-        return f"{s[:4]}…{s[-4:]}"
+    return {"twilioCallerId": TWILIO_CALLER_ID}
 
-    payload = {
-        "status": "ok",
-        "twilio": {
-            "caller_id": TWILIO_CALLER_ID or None,
-            "account_sid_masked": mask_sid(TWILIO_ACCOUNT_SID),
-            "config_ok": TWILIO_CONFIG_OK,
-            "missing_keys": MISSING_TWILIO_CONFIG,
-        },
-        "publicBaseUrl": PUBLIC_BASE_URL or None,
-    }
-    return JSONResponse(payload)
+# ---------------------------------------------------------------------------
+# Chat / ask endpoint
+# ---------------------------------------------------------------------------
 
-# =========================================================
-# Models
-# =========================================================
+class AskMessage(BaseModel):
+    role: str
+    content: str
+
+
+class AskRequest(BaseModel):
+    messages: Optional[List[AskMessage]] = None
+    message: Optional[str] = None
+    prompt: Optional[str] = None
+    input: Optional[str] = None
+
+
+def _messages_from_payload(payload: AskRequest) -> List[Dict[str, str]]:
+    if payload.messages:
+        return [{"role": m.role, "content": m.content} for m in payload.messages]
+
+    # Fallbacks: single-string variants
+    text = payload.message or payload.prompt or payload.input
+    if not text:
+        return []
+
+    return [{"role": "user", "content": text}]
+
+
+@app.post("/ask")
+@app.post("/api/ask")
+@app.post("/chat")
+@app.post("/api/chat")
+async def ask(request: Request):
+    """
+    Flexible chat endpoint used by the iOS APIClient.ask(...).
+
+    It accepts several shapes (JSON with `messages`, or single-string
+    `message` / `prompt` / `input`) and always returns:
+        {"reply": "<assistant text>"}
+    """
+    try:
+        raw = await request.json()
+    except Exception:
+        raw = {}
+
+    payload = AskRequest(**raw)
+    msgs = _messages_from_payload(payload)
+    if not msgs:
+        raise HTTPException(status_code=400, detail="No input provided.")
+
+    # Very small wrapper over OpenAI Responses API.
+    # We collapse the message history into a single textual prompt.
+    prompt_parts = []
+    for m in msgs:
+        role = (m["role"] or "user").lower()
+        content = m.get("content", "")
+        prompt_parts.append(f"{role.upper()}: {content}")
+    prompt = "\n".join(prompt_parts) + "\nASSISTANT:"
+
+    resp = openai_client.responses.create(
+        model="gpt-4.1-mini",
+        input=prompt,
+    )
+
+    try:
+        reply = resp.output[0].content[0].text
+    except Exception:
+        # As a last resort, dump the whole object.
+        reply = str(resp)
+
+    return JSONResponse({"reply": reply})
+
+# ---------------------------------------------------------------------------
+# Twilio call orchestration
+# ---------------------------------------------------------------------------
 
 class StartCallRequest(BaseModel):
     phoneNumber: str
     instructions: str
     userEmail: Optional[str] = None
 
-# =========================================================
-# Utility helpers
-# =========================================================
 
 def normalize_phone_number(raw: str) -> str:
     """Very simple normalization: keep digits, assume US if 10 digits."""
@@ -130,20 +168,20 @@ def normalize_phone_number(raw: str) -> str:
 def xml_escape(text: str) -> str:
     return (
         text.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-            .replace("'", "&apos;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
     )
 
 
-def send_summary_email(summary: str, call_sid: Optional[str], to_email: str) -> None:
+def send_summary_email(summary: str, call_sid: Optional[str], to_email: str):
     if not SUMMARY_EMAIL_FROM or not to_email:
         # Misconfigured; nothing we can do.
         return
 
     msg = EmailMessage()
-    msg["Subject"] = "SideKick360 – Call summary"
+    msg["Subject"] = "SideKick360 – Call Summary"
     msg["From"] = SUMMARY_EMAIL_FROM
     msg["To"] = to_email
 
@@ -166,14 +204,8 @@ def process_recording_and_email(
     recording_url: str,
     call_sid: Optional[str],
     user_email: Optional[str],
-) -> None:
-    """
-    Background task:
-    - download audio from Twilio
-    - transcribe with OpenAI
-    - summarize
-    - email to the user
-    """
+):
+    """Background task: download audio, transcribe with OpenAI, summarize, email."""
     # Twilio RecordingUrl usually needs an extension (e.g. .mp3) to fetch audio.
     audio_url = recording_url + ".mp3"
 
@@ -190,7 +222,7 @@ def process_recording_and_email(
         model="gpt-4o-transcribe",
         file=audio_file,
     )
-    transcript_text: str = transcription.text
+    transcript_text = transcription.text
 
     # 2) Summarize as an email
     summary_response = openai_client.responses.create(
@@ -202,20 +234,15 @@ def process_recording_and_email(
         ),
     )
 
-    # Extract the plain text from the responses output
     try:
-        summary_text = str(summary_response.output[0].content[0].text)
+        summary_text = summary_response.output[0].content[0].text
     except Exception:
-        # Fallback – send raw transcript
-        summary_text = transcript_text
+        summary_text = transcript_text  # Fallback – send raw transcript
 
     to_email = user_email or DEFAULT_SUMMARY_EMAIL_TO
     if to_email:
         send_summary_email(summary_text, call_sid, to_email)
 
-# =========================================================
-# API endpoints
-# =========================================================
 
 @app.post("/calls/start")
 async def start_call(payload: StartCallRequest):
@@ -223,16 +250,10 @@ async def start_call(payload: StartCallRequest):
     Called by the iOS app via CallService.
     Starts a Twilio outbound call and sets up a recording callback.
     """
-    if not TWILIO_CONFIG_OK:
+    if twilio_client is None:
         raise HTTPException(
             status_code=500,
-            detail=f"Twilio not configured. Missing: {', '.join(MISSING_TWILIO_CONFIG)}",
-        )
-
-    if not PUBLIC_URL_CONFIG_OK:
-        raise HTTPException(
-            status_code=500,
-            detail="PUBLIC_BASE_URL must be set so Twilio can reach your webhooks.",
+            detail="Twilio is not configured on the server (check env vars).",
         )
 
     to_number = normalize_phone_number(payload.phoneNumber)
@@ -248,10 +269,9 @@ async def start_call(payload: StartCallRequest):
 
     recording_callback = (
         f"{PUBLIC_BASE_URL}/twilio/recording-complete"
-        f"?user_email={quote(user_email)}"
+        f"?user_email={quote_plus(user_email)}"
     )
 
-    # TwiML: you can make this more sophisticated (multi-step, pauses, etc).
     safe_instructions = xml_escape(payload.instructions)
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
