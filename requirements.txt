@@ -46,3 +46,13 @@ flask-sock==0.7.0
 gevent==24.2.1
 gevent-websocket==0.10.1
 greenlet>=3.0
+
+
+# File: requirements.txt
+# Action: ADD or ENSURE these lines exist
+
+fastapi
+uvicorn[standard]
+httpx
+twilio
+openai
