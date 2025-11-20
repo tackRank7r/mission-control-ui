@@ -1,40 +1,39 @@
-# macOS
+# File: .gitignore
+# Action: REPLACE entire file
+# Purpose: Ignore build artifacts and local secrets for CGPTPROJECT.
+
+# ---- macOS cruft ----
 .DS_Store
 
-# Xcode
-xcuserdata/
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+.venv/
+venv/
+env/
+.env
+*.sqlite3
+jarvis.db
+
+# ---- iOS / Xcode ----
 DerivedData/
 build/
-*.pbxuser
-!default.pbxuser
-*.mode1v3
-!default.mode1v3
-*.mode2v3
-!default.mode2v3
-*.perspectivev3
-!default.perspectivev3
-*.xcworkspace
 *.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.xcworkspace/xcuserdata/
+ios/JarvisClient/JarvisClient.xcodeproj/project.xcworkspace/xcuserdata/
+ios/JarvisClient/JarvisClient.xcodeproj/xcuserdata/
 
-# Swift Package Manager
-.build/
-
-# CocoaPods
-Pods/
-
-# Carthage
-Carthage/Build/
-
-# Fastlane
+# ---- Fastlane / screenshots (if used) ----
 fastlane/report.xml
 fastlane/Preview.html
-fastlane/screenshots/**/*.png
+fastlane/screenshots/
 fastlane/test_output/
 
-# Flutter
-.flutter-plugins
-.packages
-Generated.xcconfig
-
-# Tuist
-Tuist/Dependencies/
+# ---- Local config / secrets ----
+Secrets.swift
+*.local.swift

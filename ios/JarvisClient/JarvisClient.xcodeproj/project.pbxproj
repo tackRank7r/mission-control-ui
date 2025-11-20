@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		D59A6F372ECD695F002D396F /* launchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = D59A6F362ECD695F002D396F /* launchScreen.storyboard */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		F75E675C2E5BCEEB007FC145 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,6 +28,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		D59A6F362ECD695F002D396F /* launchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = launchScreen.storyboard; sourceTree = "<group>"; };
 		F75E674C2E5BCEE9007FC145 /* JarvisClient
 .app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "JarvisClient\n.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		F75E675B2E5BCEEB007FC145 /* JarvisClientTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = JarvisClientTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -89,6 +94,7 @@
 		F75E67432E5BCEE8007FC145 = {
 			isa = PBXGroup;
 			children = (
+				D59A6F362ECD695F002D396F /* launchScreen.storyboard */,
 				F75E674E2E5BCEE9007FC145 /* JarvisClient */,
 				F75E675E2E5BCEEB007FC145 /* JarvisClientTests */,
 				F75E67682E5BCEEB007FC145 /* JarvisClientUITests */,
@@ -229,6 +235,7 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				D59A6F372ECD695F002D396F /* launchScreen.storyboard in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
