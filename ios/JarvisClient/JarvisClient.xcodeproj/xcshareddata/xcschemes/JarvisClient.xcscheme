@@ -16,7 +16,7 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "F75E674B2E5BCEE9007FC145"
-               BuildableName = "JarvisClient.app"
+               BuildableName = "JarvisClient&#10;.app"
                BlueprintName = "JarvisClient"
                ReferencedContainer = "container:JarvisClient.xcodeproj">
             </BuildableReference>
@@ -69,7 +69,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "F75E674B2E5BCEE9007FC145"
-            BuildableName = "JarvisClient.app"
+            BuildableName = "JarvisClient&#10;.app"
             BlueprintName = "JarvisClient"
             ReferencedContainer = "container:JarvisClient.xcodeproj">
          </BuildableReference>
@@ -86,7 +86,7 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "F75E674B2E5BCEE9007FC145"
-            BuildableName = "JarvisClient.app"
+            BuildableName = "JarvisClient&#10;.app"
             BlueprintName = "JarvisClient"
             ReferencedContainer = "container:JarvisClient.xcodeproj">
          </BuildableReference>

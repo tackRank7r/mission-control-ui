@@ -1,382 +1,269 @@
-// ==============================
-// File: JarvisClient/ContentView.swift
-// (voice mode: hides chat, shows spinning blue vortex + debug label)
-// ==============================
+// File: ios/JarvisClient/JarvisClient/contentView.swift
+// Action: REPLACE entire file
+// Purpose: Main chat UI with dual mic radar buttons, per Runbook v14.
+
 import SwiftUI
-#if canImport(MessageUI)
-import MessageUI
-#endif
-
-// NOTE: These helpers (ErrorBanner, InfoBanner, MessageBubble, FallbackMailView)
-// must be defined exactly once in the project. This file does NOT redeclare them.
-
-// Define custom notification name for API client last path
-extension Notification.Name {
-    static let apiClientLastPath = Notification.Name("apiClientLastPath")
-}
 
 struct ContentView: View {
-    // UI state
-    @State private var showHistory = false
-    @State private var showMenu = false
-    @State private var showMail = false
-    @State private var text: String = ""
-
-    // Local info banner
-    @State private var infoMessage: String? = nil
-
-    // Debug last path used
-    @State private var lastPathUsed: String = "—"
-
-    // Models
-    @StateObject private var store = ChatStore()
     @StateObject private var vm = ChatViewModel()
-    @StateObject private var voice = VoiceChatManager()
+
+    @State private var inputText: String = ""
+    @State private var showMenu = false
+    @State private var showContext = false
+    @State private var showGuidedTour = false
+
+    @State private var isDictationActive = false
+    @State private var isVoiceChatActive = false
 
     var body: some View {
         NavigationStack {
             ZStack {
-                // MAIN CONTENT switches depending on voice.state
-                if voice.state == .idle {
-                    chatContent
-                } else {
-                    voiceContent
+                // Full-screen background (inside safe area)
+                Color(.systemBackground)
+                    .ignoresSafeArea()
+
+                VStack(spacing: 0) {
+                    header
+                    Divider().opacity(0.0)
+                    chatList
                 }
             }
+            // Input bar pinned above the keyboard
             .safeAreaInset(edge: .bottom) {
-                if voice.state == .idle { bottomBar }
+                inputBar
+                    .background(.thinMaterial)
             }
-            .navigationTitle("Jarvis")
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Menu") { showMenu = true }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.blue)
-                        .accessibilityIdentifier("MenuButton")
-                }
+            // Jarvis Menu sheet
+            .sheet(isPresented: $showMenu) {
+                MainMenuView(
+                    onDismiss: { showMenu = false },
+                    onMakePhoneCall: {
+                        showMenu = false
+                        handleMakePhoneCallFromMenu()
+                    }
+                )
             }
-            .sheet(isPresented: $showMenu) { menuSheet }
-            .sheet(isPresented: $showHistory) { historySheet }
-            .sheet(isPresented: $showMail) { mailSheet }
-            .onAppear {
-                vm.messages = store.currentSession.messages.isEmpty
-                    ? [Message(role: .system, content: "Hello! You’re chatting with Jarvis.")]
-                    : store.currentSession.messages
+            // App Context sheet
+            .sheet(isPresented: $showContext) {
+                AppContextView()
             }
-            .onReceive(NotificationCenter.default.publisher(for: .apiClientLastPath)) { note in
-                if let s = note.object as? String { lastPathUsed = s }
+            // Guided Tour sheet
+            .sheet(isPresented: $showGuidedTour) {
+                GuidedTourView()
             }
         }
+        // Hide nav chrome; Jarvis header hugs the safe-area top
+        .toolbar(.hidden, for: .navigationBar)
     }
 
-    // MARK: - Chat content (when voice is idle)
-    private var chatContent: some View {
-        VStack(spacing: 0) {
-            if let err = vm.error {
-                ErrorBanner(text: err) { vm.error = nil }
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-            if let info = infoMessage {
-                InfoBanner(text: info) { infoMessage = nil }
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
-            if let vErr = voice.lastError {
-                ErrorBanner(text: vErr) { voice.lastError = nil }
-                    .transition(.move(edge: .top).combined(with: .opacity))
-            }
+    // MARK: - Header
 
-            // Debug line: state + last backend route used
-            HStack(spacing: 8) {
-                Text("State: \(stateLabel(voice.state))")
-                    .font(.caption2)
-                    .padding(.horizontal, 6).padding(.vertical, 2)
-                    .background(Capsule().fill(Color.gray.opacity(0.15)))
-                Image(systemName: "antenna.radiowaves.left.and.right")
-                Text("API: \(lastPathUsed)")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                Spacer()
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 6)
-
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(vm.messages) { msg in
-                        MessageBubble(message: msg)
-                    }
-                    if vm.isSending {
-                        ProgressView().padding(.vertical, 8)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-            }
-        }
-    }
-
-    // MARK: - Voice content (when voice is active)
-    private var voiceContent: some View {
-        VStack(spacing: 18) {
-            if let vErr = voice.lastError {
-                ErrorBanner(text: vErr) { voice.lastError = nil }
-            }
-
-            Spacer()
-
-            // Blue vortex visualizer (reacts to audio level)
-            VortexView(level: voice.audioLevel, state: voice.state)
-                .frame(width: 180, height: 180)
-                .accessibilityIdentifier("VoiceVortex")
-
-            if !voice.partialTranscript.isEmpty {
-                Text(voice.partialTranscript)
-                    .font(.title3)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.center)
-                    .foregroundColor(.secondary)
-                    .padding(.horizontal, 20)
-                    .transition(.opacity)
-            }
-
-            Spacer()
-
+    private var header: some View {
+        HStack(alignment: .center, spacing: 12) {
+            // Hamburger → Jarvis Menu
             Button {
-                voice.stopAll()
+                showMenu = true
             } label: {
-                Label("Exit Voice Chat", systemImage: "xmark.circle.fill")
-                    .font(.headline)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
-                    .background(Capsule().fill(Color.red.opacity(0.2)))
-                    .overlay(Capsule().stroke(Color.red.opacity(0.5)))
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 24, weight: .semibold))
+                    .padding(10)
+                    .foregroundColor(AppTheme.primary)
             }
-            .buttonStyle(.plain)
-            .padding(.bottom, 22)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Jarvis")
+                    .font(.system(size: 34, weight: .bold))
+
+                Text("Your project & comms assistant")
+                    .font(.subheadline)
+                    .foregroundColor(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+
+            Spacer()
+
+            // Question mark → Guided Tour
+            Button {
+                showGuidedTour = true
+            } label: {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 22, weight: .semibold))
+                    .padding(10)
+                    .foregroundColor(AppTheme.primary)
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(inputBackground.ignoresSafeArea())
+        .padding(.horizontal, 20)
+        .padding(.top, 4)   // slightly tighter than before
+        .padding(.bottom, 4)
     }
 
-    // MARK: - Bottom Bar (Voice controls + Text input)
-    private var bottomBar: some View {
-        VStack(spacing: 12) {
-            // Voice controls row
-            HStack(spacing: 12) {
-                Button {
-                    if voice.state == .idle {
-                        Task { await voice.requestAndStart() }   // <-- key change
-                    } else {
-                        voice.stopAll()
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: iconForState(voice.state))
-                        Text(labelForState(voice.state))
-                    }
-                    .font(.callout.weight(.semibold))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .background(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .fill(colorForState(voice.state))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(borderForState(voice.state), lineWidth: 1)
-                    )
-                    .foregroundStyle(.primary)
-                }
-                .buttonStyle(.plain)
+    // MARK: - Chat list
 
-                if !voice.partialTranscript.isEmpty {
-                    Text(voice.partialTranscript)
-                        .lineLimit(2)
-                        .font(.callout)
-                        .foregroundColor(.secondary)
-                        .transition(.opacity)
-                }
-            }
-
-            // Typed input row
-            HStack(spacing: 10) {
-                TextField("Type a message…", text: $text)
-                    .textFieldStyle(.roundedBorder)
-                    .disabled(vm.isSending || voice.state != .idle)
-                    .opacity(voice.state == .idle ? 1 : 0.5)
-                    .onSubmit { sendTyped() }
-
-                Button(action: { sendTyped() }) {
-                    Image(systemName: "paperplane.fill")
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(
-                            Capsule().fill(
-                                canSend ? Color.blue : Color.gray.opacity(0.35)
-                            )
+    private var chatList: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(spacing: 6) {
+                    ForEach(vm.messages) { message in
+                        ChatBubbleView(
+                            side: message.role == .user ? .me : .bot,
+                            text: message.content
                         )
-                        .foregroundColor(.white)
-                        .accessibilityIdentifier("SendButton")
+                        .id(message.id)
+                    }
                 }
-                .disabled(!canSend)
+                .padding(.vertical, 8)
+            }
+            // Tap anywhere in the conversation to dismiss keyboard
+            .onTapGesture {
+                UIApplication.shared.endEditing()
+            }
+            .onChange(of: vm.messages.count) { _ in
+                guard let last = vm.messages.last else { return }
+                withAnimation {
+                    proxy.scrollTo(last.id, anchor: .bottom)
+                }
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-        .background(inputBackground)
-        .shadow(radius: 2)
     }
 
-    private var canSend: Bool {
-        !vm.isSending
-        && voice.state == .idle
-        && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    // MARK: - Input bar (dual radar mics + Send)
+
+    private var inputBar: some View {
+        let canSend = !inputText
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .isEmpty
+
+        return HStack(spacing: 8) {
+            // LEFT MIC – dictation radar
+            MicRadarButton(
+                systemName: "mic.fill",
+                isActive: $isDictationActive
+            ) {
+                // TODO: hook into VoiceInputManager for dictation
+                UIApplication.shared.endEditing()
+            }
+
+            // TEXT FIELD
+            TextField("Message…", text: $inputText)
+                .textFieldStyle(.plain)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(Color(UIColor.systemGray4), lineWidth: 1)
+                )
+                .submitLabel(.send)
+                .onSubmit {
+                    sendCurrentMessage()
+                }
+
+            // RIGHT MIC – voice chat radar
+            MicRadarButton(
+                systemName: "waveform",
+                isActive: $isVoiceChatActive
+            ) {
+                // TODO: present full-screen voice chat / spinning icon animation
+                UIApplication.shared.endEditing()
+            }
+
+            // SEND BUTTON – blue when enabled
+            Button(action: sendCurrentMessage) {
+                Text("Send")
+                    .font(.system(size: 17, weight: .semibold))
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(canSend ? AppTheme.primary : Color(UIColor.systemGray4))
+                    .foregroundColor(.white)
+                    .clipShape(Capsule())
+            }
+            .disabled(!canSend)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 4)   // slightly tighter than before
     }
 
     // MARK: - Actions
-    private func sendTyped() {
-        let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !t.isEmpty, voice.state == .idle else { return }
-        let sendText = t
-        text = ""
+
+    private func sendCurrentMessage() {
+        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        let textToSend = trimmed
+        inputText = ""
+
         Task {
-            await vm.send(userText: sendText)
-            store.updateCurrentMessages(vm.messages)
+            await vm.sendUserMessage(textToSend)
         }
     }
 
-    // MARK: - Visual helpers (primary colors w/ contrast)
-    private func stateLabel(_ s: VoiceChatManager.State) -> String {
-        switch s {
-        case .idle: "Idle"
-        case .listening: "Listening"
-        case .thinking: "Thinking"
-        case .speaking: "Speaking"
-        }
-    }
-
-    private func iconForState(_ s: VoiceChatManager.State) -> String {
-        switch s {
-        case .idle: return "waveform.circle"
-        case .listening: return "waveform.circle.fill"
-        case .thinking: return "bolt.circle"
-        case .speaking: return "speaker.wave.3.fill"
-        }
-    }
-    private func labelForState(_ s: VoiceChatManager.State) -> String {
-        switch s {
-        case .idle: return "Voice"
-        case .listening: return "Listening…"
-        case .thinking: return "Thinking…"
-        case .speaking: return "Speaking…"
-        }
-    }
-    private func colorForState(_ s: VoiceChatManager.State) -> Color {
-        switch s {
-        case .idle:      return Color.blue.opacity(0.28)
-        case .listening: return Color.green.opacity(0.30)
-        case .thinking:  return Color.orange.opacity(0.32)
-        case .speaking:  return Color.red.opacity(0.28)
-        }
-    }
-    private func borderForState(_ s: VoiceChatManager.State) -> Color {
-        switch s {
-        case .idle:      return Color.blue.opacity(0.60)
-        case .listening: return Color.green.opacity(0.65)
-        case .thinking:  return Color.orange.opacity(0.65)
-        case .speaking:  return Color.red.opacity(0.60)
-        }
-    }
-
-    private var inputBackground: some View {
-        Group {
-            if #available(iOS 15.0, *) { Color.clear.background(.ultraThinMaterial) }
-            else { Color(.systemBackground).opacity(0.92) }
-        }
-    }
-
-    // MARK: - Sheets
-    private var menuSheet: some View {
-        MenuSheet(
-            store: store,
-            openHistory: { showMenu = false; showHistory = true },
-            openEmail: { showMenu = false; showMail = true },
-            logout: {
-                showMenu = false
-                infoMessage = "Logged out."
-                Haptics.success()
-            }
-        )
-        .presentationDetents([.medium, .large])
-    }
-
-    private var historySheet: some View {
-        HistoryView(
-            store: store,
-            onSelect: { s in
-                store.setCurrent(s.id)
-                vm.messages = store.currentSession.messages
-            },
-            onNew: {
-                store.newSession()
-                vm.messages = store.currentSession.messages
-                infoMessage = "Started a new chat."
-            }
-        )
-    }
-
-    private var mailSheet: some View {
-        Group {
-            #if canImport(MessageUI)
-            if MFMailComposeViewController.canSendMail() {
-                MailComposer(
-                    recipient: "support@jarvisapp.io",
-                    subject: "Jarvis Feedback",
-                    messageBody: "Hi Jarvis team,\n\nI’d like to share some feedback..."
-                )
-            } else {
-                FallbackMailView(url: URL(string: "mailto:support@jarvisapp.io?subject=Jarvis%20Feedback")!)
-            }
-            #else
-            FallbackMailView(url: URL(string: "mailto:support@jarvisapp.io?subject=Jarvis%20Feedback")!)
-            #endif
+    private func handleMakePhoneCallFromMenu() {
+        // Nudge into call-planning flow via ChatViewModel’s prompt.
+        let helper = "I’d like to plan a phone call with someone. Please help me collect the details."
+        Task {
+            await vm.sendUserMessage(helper)
         }
     }
 }
 
-// MARK: - Blue Vortex Visualizer (unique name, does not collide)
-private struct VortexView: View {
-    let level: CGFloat      // 0...1 from mic
-    let state: VoiceChatManager.State
+// MARK: - Radar mic button
 
-    @State private var rotate = false
+struct MicRadarButton: View {
+    let systemName: String
+    @Binding var isActive: Bool
+    let action: () -> Void
+
+    @State private var sweep = false
 
     var body: some View {
-        ZStack {
-            // Base blue disc
-            Circle()
-                .fill(LinearGradient(
-                    colors: [Color.blue.opacity(0.65), Color.blue.opacity(0.35)],
-                    startPoint: .top, endPoint: .bottom))
-                .scaleEffect(1 + level * 0.12)
-
-            // Concentric rings that rotate (vortex)
-            ForEach(0..<5, id: \.self) { i in
-                Circle()
-                    .strokeBorder(Color.white.opacity(0.45 - Double(i)*0.07), lineWidth: 2)
-                    .padding(CGFloat(i) * 12)
-                    .rotationEffect(.degrees(rotate ? Double(360 * (i % 2 == 0 ? 1 : -1)) : 0))
-                    .animation(.linear(duration: Double(8 - i)).repeatForever(autoreverses: false), value: rotate)
+        Button {
+            isActive.toggle()
+            action()
+            if isActive {
+                sweep = true
+            } else {
+                sweep = false
             }
+        } label: {
+            ZStack {
+                // Base circle with red outline
+                Circle()
+                    .fill(Color.white)
+                    .overlay(
+                        Circle().stroke(AppTheme.accent, lineWidth: 2)
+                    )
+                    .frame(width: 44, height: 44)
 
-            // Crosshair lines (subtle)
-            VStack { Rectangle().fill(Color.white.opacity(0.25)).frame(width: 2) }
-                .padding(.horizontal, 20)
-            HStack { Rectangle().fill(Color.white.opacity(0.25)).frame(height: 2) }
-                .padding(.vertical, 20)
+                // Spinning radar arc
+                Circle()
+                    .trim(from: 0.0, to: 0.35)
+                    .stroke(
+                        AppTheme.accent.opacity(0.6),
+                        style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                    )
+                    .frame(width: 32, height: 32)
+                    .rotationEffect(Angle.degrees(sweep && isActive ? 360 : 0))
+                    .animation(
+                        isActive
+                        ? .linear(duration: 1.0).repeatForever(autoreverses: false)
+                        : .default,
+                        value: sweep && isActive
+                    )
+
+                // Mic / waveform icon
+                Image(systemName: systemName)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(AppTheme.primary)
+            }
         }
-        .onAppear { rotate = true }
-        .onChange(of: state) { _ in rotate = (state != .idle) }
+    }
+}
+
+// MARK: - Keyboard helper
+
+private extension UIApplication {
+    func endEditing() {
+        sendAction(#selector(UIResponder.resignFirstResponder),
+                   to: nil, from: nil, for: nil)
     }
 }

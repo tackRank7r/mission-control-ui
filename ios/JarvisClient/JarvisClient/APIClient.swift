@@ -1,12 +1,36 @@
 // ==========================
-// File: JarvisClient/APIClient.swift  (FULL REPLACEMENT – broad legacy compatibility)
+// File: JarvisClient/APIClient.swift  (FULL REPLACEMENT – safe, backward-compatible)
 // ==========================
 import Foundation
 
-// Single source of truth for the /ask payload/response
+// Server reply shape used throughout
 struct AskResponse: Codable, Equatable { let reply: String }
 
+// MARK: - APIClient
+
 final class APIClient {
+    // Singleton + static convenience so existing call sites keep working.
+    static let shared = APIClient()
+
+    // ---- Static convenience wrappers (safe to call from anywhere) ----
+    /// Minimal call that matches your working cURL:
+    /// POST /ask { message, sessionId }  ->  { reply }
+    static func askJarvis(_ text: String, sessionId: String) async throws -> AskResponse {
+        try await APIClient.shared.askJarvis(text, sessionId: sessionId)
+    }
+
+    /// Old name some code uses
+    static func sendChat(messages: [Message]) async throws -> AskResponse {
+        try await APIClient.shared.ask(messages: messages)
+    }
+
+    /// Static passthrough for /speak
+    static func speak(_ text: String) async throws -> Data {
+        try await APIClient.shared.speak(text)
+    }
+
+    // ------------------------------------------------------------------
+
     enum BackendMode { case modern, legacy, unknown }
 
     private let urlSession: URLSession
@@ -20,9 +44,28 @@ final class APIClient {
         self.urlSession = session
     }
 
-    // MARK: - Public
+    // MARK: - NEW: minimal /ask that mirrors your working server
+    struct AskPayload: Codable { let message: String; let sessionId: String }
 
-    /// Sends chat using modern `/ask` or falls back to legacy `/api/chat`.
+    /// Exact shape that worked with your Render app via curl.
+    func askJarvis(_ text: String, sessionId: String) async throws -> AskResponse {
+        var req = URLRequest(url: Secrets.askEndpoint)
+        req.httpMethod = "POST"
+        apply(headers: Secrets.headers(json: true), to: &req)
+        req.httpBody = try JSONEncoder().encode(AskPayload(message: text, sessionId: sessionId))
+
+        let (data, resp) = try await urlSession.data(for: req)
+        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? -1
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw error("ask (/ask) failed \(status): \(body)", code: status, domain: "APIClient.askJarvis")
+        }
+        return try JSONDecoder().decode(AskResponse.self, from: data)
+    }
+
+    // MARK: - Richer chat (modern first, then legacy fallbacks)
+
+    /// Sends chat using modern `/ask` (messages array) or falls back to legacy `/api/chat`.
     func ask(messages: [Message]) async throws -> AskResponse {
         // Ensure final message is a non-empty user utterance
         guard let last = messages.last, last.role == .user else {
@@ -35,7 +78,7 @@ final class APIClient {
 
         try await ensureMode()
 
-        // 1) Try modern /ask first when we believe it exists
+        // 1) Modern JSON /ask with full messages
         if mode != .legacy {
             if let ok = try? await askModern(messages: messages) {
                 lastPathUsed = "modern:/ask (json)"
@@ -45,33 +88,30 @@ final class APIClient {
             }
         }
 
-        // 2) Legacy compatibility ladder (stop on first success)
-        // 2a) JSON
-        if let ok = try? await legacyJSON(prompt: prompt, system: systemFrom(messages)) {
+        // 2) Legacy compatibility ladder (first success wins)
+        let sys = systemFrom(messages)
+        if let ok = try? await legacyJSON(prompt: prompt, system: sys) {
             lastPathUsed = "legacy:/api/chat (json)"
             mode = .legacy; modeCache = (.legacy, Date())
             return ok
         }
-        // 2b) x-www-form-urlencoded
-        if let ok = try? await legacyForm(prompt: prompt, system: systemFrom(messages)) {
+        if let ok = try? await legacyForm(prompt: prompt, system: sys) {
             lastPathUsed = "legacy:/api/chat (form)"
             mode = .legacy; modeCache = (.legacy, Date())
             return ok
         }
-        // 2c) multipart/form-data
-        if let ok = try? await legacyMultipart(prompt: prompt, system: systemFrom(messages)) {
+        if let ok = try? await legacyMultipart(prompt: prompt, system: sys) {
             lastPathUsed = "legacy:/api/chat (multipart)"
             mode = .legacy; modeCache = (.legacy, Date())
             return ok
         }
-        // 2d) GET with query params (as a last resort)
-        if let ok = try? await legacyGET(prompt: prompt, system: systemFrom(messages)) {
+        if let ok = try? await legacyGET(prompt: prompt, system: sys) {
             lastPathUsed = "legacy:/api/chat (GET query)"
             mode = .legacy; modeCache = (.legacy, Date())
             return ok
         }
 
-        throw error("All request shapes failed (ask/json, chat/json, chat/form, chat/multipart, chat/GET). See server logs for why.",
+        throw error("All request shapes failed (ask/json, chat/json, chat/form, chat/multipart, chat/GET).",
                     code: 400, domain: "APIClient")
     }
 
@@ -79,7 +119,7 @@ final class APIClient {
     func speak(_ text: String) async throws -> Data {
         var req = URLRequest(url: Secrets.speakEndpoint)
         req.httpMethod = "POST"
-        apply(headers: makeHeaders(json: true), to: &req)
+        apply(headers: Secrets.headers(json: true), to: &req)
         req.httpBody = try JSONSerialization.data(withJSONObject: ["text": text], options: [])
 
         let (data, resp) = try await urlSession.data(for: req)
@@ -88,12 +128,8 @@ final class APIClient {
             let body = String(data: data, encoding: .utf8) ?? ""
             throw error("Bad status \(status). \(body)", code: status, domain: "APIClient.speak")
         }
-        
         return data
     }
-
-    // Legacy alias
-    func sendChat(messages: [Message]) async throws -> AskResponse { try await ask(messages: messages) }
 
     // MARK: - Mode discovery
 
@@ -117,14 +153,14 @@ final class APIClient {
     private func fetchDiagnostics() async throws -> DiagnosticsResponse {
         var req = URLRequest(url: Secrets.diagnosticsEndpoint)
         req.httpMethod = "GET"
-        apply(headers: makeHeaders(json: false), to: &req)
+        apply(headers: Secrets.headers(json: false), to: &req)
         let (data, _) = try await urlSession.data(for: req)
         return try JSONDecoder().decode(DiagnosticsResponse.self, from: data)
     }
 
     private func routeLikelyExists(_ url: URL) async -> Bool {
         var req = URLRequest(url: url); req.httpMethod = "OPTIONS"
-        apply(headers: makeHeaders(json: false), to: &req)
+        apply(headers: Secrets.headers(json: false), to: &req)
         do {
             let (_, resp) = try await urlSession.data(for: req)
             if let http = resp as? HTTPURLResponse {
@@ -134,27 +170,26 @@ final class APIClient {
         return false
     }
 
-    // MARK: - Modern /ask
+    // MARK: - Modern /ask (messages)
 
     private func askModern(messages: [Message]) async throws -> AskResponse {
         var req = URLRequest(url: Secrets.askEndpoint)
         req.httpMethod = "POST"
-        apply(headers: makeHeaders(json: true), to: &req)
+        apply(headers: Secrets.headers(json: true), to: &req)
 
         let payload = messages.map { ["role": $0.role.rawValue, "content": $0.content] }
-        req.httpBody = try JSONSerialization.data(with: ["messages": payload])
+        req.httpBody = try JSONSerialization.data(withJSONObject: ["messages": payload], options: [])
 
         let (data, resp) = try await urlSession.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw error("ask failed \( (resp as? HTTPURLResponse)?.statusCode ?? -1): \(String(data: data, encoding: .utf8) ?? "")",
-                        code: (resp as? HTTPURLResponse)?.statusCode ?? -1, domain: "APIClient.ask")
+            throw error("ask (/ask messages) failed \( (resp as? HTTPURLResponse)?.statusCode ?? -1): \(String(data: data, encoding: .utf8) ?? "")",
+                        code: (resp as? HTTPURLResponse)?.statusCode ?? -1, domain: "APIClient.askModern")
         }
         return try JSONDecoder().decode(AskResponse.self, from: data)
     }
 
     // MARK: - Legacy shapes
 
-    // Common parse for legacy replies
     private func parseLegacy(_ data: Data) throws -> AskResponse {
         if let r = try? JSONDecoder().decode(AskResponse.self, from: data) { return r }
         if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -162,9 +197,7 @@ final class APIClient {
                 if let s = obj[key] as? String, !s.isEmpty { return AskResponse(reply: s) }
             }
         }
-        if let s = String(data: data, encoding: .utf8), !s.isEmpty {
-            return AskResponse(reply: s)
-        }
+        if let s = String(data: data, encoding: .utf8), !s.isEmpty { return AskResponse(reply: s) }
         throw error("Unparseable legacy body", code: -1, domain: "APIClient.legacy.parse")
     }
 
@@ -178,22 +211,12 @@ final class APIClient {
         addAuthAcceptHeaders(to: &req)
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
-        // send many aliases; server can pick what it wants
         var body: [String: Any] = [
-            "user_text": prompt,
-            "prompt": prompt,
-            "text": prompt,
-            "message": prompt,
-            "query": prompt,
-            "q": prompt,
-            "input": prompt,
-            "userText": prompt
+            "user_text": prompt, "prompt": prompt, "text": prompt, "message": prompt,
+            "query": prompt, "q": prompt, "input": prompt, "userText": prompt
         ]
-        if let system {
-            body["system"] = system
-            body["system_prompt"] = system
-        }
-        req.httpBody = try JSONSerialization.data(with: body)
+        if let system { body["system"] = system; body["system_prompt"] = system }
+        req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
 
         let (data, resp) = try await urlSession.data(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -239,7 +262,6 @@ final class APIClient {
         req.httpMethod = "POST"
         addAuthAcceptHeaders(to: &req)
 
-        // Build multipart/form-data
         let boundary = "----JarvisBoundary\(UUID().uuidString)"
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
@@ -306,30 +328,11 @@ final class APIClient {
         messages.first(where: { $0.role == .system })?.content
     }
 
-    private func makeHeaders(json: Bool) -> [String: String] {
-        var h = Secrets.extraHeaders
-        if json {
-            h["Content-Type"] = "application/json"
-            if h["Accept"] == nil { h["Accept"] = "application/json" }
-        }
-        if !Secrets.backendBearer.isEmpty {
-            h["Authorization"] = "Bearer \(Secrets.backendBearer)"
-        }
-        return h
-    }
-
     private func apply(headers: [String: String], to request: inout URLRequest) {
         for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
     }
 
     private func error(_ msg: String, code: Int = -1, domain: String = "APIClient") -> NSError {
         NSError(domain: domain, code: code, userInfo: [NSLocalizedDescriptionKey: msg])
-    }
-}
-
-// Tiny helper so JSONSerialization calls are concise
-private extension JSONSerialization {
-    static func data(with obj: Any) throws -> Data {
-        try JSONSerialization.data(withJSONObject: obj, options: [])
     }
 }

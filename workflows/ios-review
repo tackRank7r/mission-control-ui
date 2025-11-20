@@ -1,0 +1,89 @@
+name: iOS Review
+
+on:
+  workflow_dispatch:
+    inputs:
+      label:
+        description: Unique label from n8n (used to find results)
+        required: true
+      scheme:
+        description: Xcode scheme to build/test
+        required: true
+        default: YourApp
+      device:
+        description: Simulator device name
+        required: true
+        default: iPhone 16
+      logs_branch:
+        description: Branch to store review summaries
+        required: true
+        default: ai/review-logs
+
+permissions:
+  contents: write       # so we can push the summary JSON
+  actions: read
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+
+      - uses: maxim-lobanov/setup-xcode@v1
+        with: { xcode-version: "16.0" }
+
+      - name: Resolve SPM
+        run: xcodebuild -resolvePackageDependencies -scheme "${{ inputs.scheme }}"
+
+      - name: Build & Test (Simulator)
+        id: test
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          mkdir -p build
+          xcodebuild \
+            -scheme "${{ inputs.scheme }}" \
+            -destination "platform=iOS Simulator,name=${{ inputs.device }}" \
+            -resultBundlePath build/Results.xcresult \
+            test | tee build/build.log
+
+      - name: Make review summary (JSON)
+        id: summary
+        run: |
+          LOG=build/build.log
+          WARN=$(grep -E "warning:" "$LOG" | wc -l | tr -d ' ')
+          ERR=$(grep -E "error:" "$LOG" | wc -l | tr -d ' ')
+          FAIL=$(grep -E "FAILED|Failing tests|\\*\\* TEST FAILED \\*\\*" "$LOG" | wc -l | tr -d ' ')
+          TAIL=$(tail -n 400 "$LOG" | python3 - <<'PY'
+import sys, json; print(json.dumps(sys.stdin.read()))
+PY
+)
+          STATUS="${{ steps.test.outcome == 'success' && '0' || '1' }}"
+          cat > review-summary.json <<JSON
+{
+  "status": $STATUS,
+  "warnings": $WARN,
+  "errors": $ERR,
+  "failedTests": $FAIL,
+  "device": "${{ inputs.device }}",
+  "scheme": "${{ inputs.scheme }}",
+  "label": "${{ inputs.label }}",
+  "logTail": $TAIL
+}
+JSON
+
+      - name: Commit summary to logs branch
+        env:
+          BRANCH: ${{ inputs.logs_branch }}
+          LABEL:  ${{ inputs.label }}
+        run: |
+          git config user.email "actions@users.noreply.github.com"
+          git config user.name  "github-actions[bot]"
+          git fetch origin "$BRANCH" || true
+          git checkout -B "$BRANCH" origin/"$BRANCH" || git checkout -B "$BRANCH"
+          mkdir -p review
+          mv review-summary.json "review/summary-${LABEL}.json"
+          git add "review/summary-${LABEL}.json"
+          git commit -m "iOS review summary ${LABEL}" || echo "Nothing to commit"
+          git push origin "$BRANCH"
