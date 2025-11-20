@@ -43,6 +43,11 @@ twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 openai_client = OpenAI()
 
 app = FastAPI(title="Jarvis Call Orchestrator")
+ # Action: INSERT after `app = FastAPI(...)`
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 # --- Models ---
 
