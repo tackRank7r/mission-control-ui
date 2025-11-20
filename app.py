@@ -1,6 +1,12 @@
 # File: app.py
 # Action: REPLACE entire file
-# Purpose: FastAPI backend for starting Twilio calls and emailing OpenAI summaries.
+#
+# Purpose:
+# - FastAPI backend for starting Twilio calls and emailing OpenAI summaries.
+# - /health: simple health probe (never crashes even if Twilio config is missing).
+# - /diagnostics: returns Twilio caller ID and config info for the iOS “View phone number” screen.
+# - /calls/start: called by iOS CallService to start an outbound Twilio call.
+# - /twilio/recording-complete: Twilio webhook to process recording → OpenAI → email summary.
 
 import os
 import io
@@ -10,13 +16,15 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, JSONResponse
 from pydantic import BaseModel
 from twilio.rest import Client as TwilioClient
 import httpx
 from openai import OpenAI
 
-# --- Configuration from environment ---
+# =========================================================
+# Configuration from environment
+# =========================================================
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN", "")
@@ -31,33 +39,82 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", "587"))
 SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "")
 SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "")
 
-if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN or not TWILIO_CALLER_ID:
-    raise RuntimeError("Missing Twilio configuration in environment variables.")
+# Twilio config check – but DO NOT crash the whole app if missing.
+MISSING_TWILIO_CONFIG = []
+if not TWILIO_ACCOUNT_SID:
+    MISSING_TWILIO_CONFIG.append("TWILIO_ACCOUNT_SID")
+if not TWILIO_AUTH_TOKEN:
+    MISSING_TWILIO_CONFIG.append("TWILIO_AUTH_TOKEN")
+if not TWILIO_CALLER_ID:
+    MISSING_TWILIO_CONFIG.append("TWILIO_CALLER_ID")
 
-if not PUBLIC_BASE_URL:
-    raise RuntimeError("PUBLIC_BASE_URL must be set so Twilio can reach your webhooks.")
+TWILIO_CONFIG_OK = len(MISSING_TWILIO_CONFIG) == 0
+PUBLIC_URL_CONFIG_OK = bool(PUBLIC_BASE_URL)
 
-# --- Clients ---
+# =========================================================
+# Clients
+# =========================================================
 
-twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+twilio_client = TwilioClient(TWILIO_ACCOUNT_SID or None, TWILIO_AUTH_TOKEN or None)
 openai_client = OpenAI()
 
-app = FastAPI(title="Jarvis Call Orchestrator")
- # Action: INSERT after `app = FastAPI(...)`
+app = FastAPI(title="SideKick360 Call Orchestrator")
+
+# =========================================================
+# Health + diagnostics
+# =========================================================
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health() -> dict:
+    """
+    Lightweight health check used by Render and the iOS app.
+    Never raises, even if env vars are missing.
+    """
+    return {
+        "status": "ok",
+        "twilioConfigured": TWILIO_CONFIG_OK,
+        "publicBaseUrlConfigured": PUBLIC_URL_CONFIG_OK,
+    }
 
-# --- Models ---
+
+@app.get("/diagnostics")
+async def diagnostics() -> JSONResponse:
+    """
+    Returns basic configuration info, including the Twilio caller ID.
+    The iOS 'View phone number' screen hits this endpoint.
+    """
+    # Light masking for safety if you ever show this outside development.
+    def mask_sid(s: str) -> str:
+        if not s:
+            return ""
+        if len(s) <= 8:
+            return s
+        return f"{s[:4]}…{s[-4:]}"
+
+    payload = {
+        "status": "ok",
+        "twilio": {
+            "caller_id": TWILIO_CALLER_ID or None,
+            "account_sid_masked": mask_sid(TWILIO_ACCOUNT_SID),
+            "config_ok": TWILIO_CONFIG_OK,
+            "missing_keys": MISSING_TWILIO_CONFIG,
+        },
+        "publicBaseUrl": PUBLIC_BASE_URL or None,
+    }
+    return JSONResponse(payload)
+
+# =========================================================
+# Models
+# =========================================================
 
 class StartCallRequest(BaseModel):
     phoneNumber: str
     instructions: str
     userEmail: Optional[str] = None
 
-
-# --- Utilities ---
+# =========================================================
+# Utility helpers
+# =========================================================
 
 def normalize_phone_number(raw: str) -> str:
     """Very simple normalization: keep digits, assume US if 10 digits."""
@@ -69,6 +126,7 @@ def normalize_phone_number(raw: str) -> str:
     # Fallback: just prefix + if missing
     return "+" + digits
 
+
 def xml_escape(text: str) -> str:
     return (
         text.replace("&", "&amp;")
@@ -78,13 +136,14 @@ def xml_escape(text: str) -> str:
             .replace("'", "&apos;")
     )
 
-def send_summary_email(summary: str, call_sid: Optional[str], to_email: str):
+
+def send_summary_email(summary: str, call_sid: Optional[str], to_email: str) -> None:
     if not SUMMARY_EMAIL_FROM or not to_email:
         # Misconfigured; nothing we can do.
         return
 
     msg = EmailMessage()
-    msg["Subject"] = "Jarvis – Call Summary"
+    msg["Subject"] = "SideKick360 – Call summary"
     msg["From"] = SUMMARY_EMAIL_FROM
     msg["To"] = to_email
 
@@ -103,8 +162,18 @@ def send_summary_email(summary: str, call_sid: Optional[str], to_email: str):
         smtp.send_message(msg)
 
 
-def process_recording_and_email(recording_url: str, call_sid: Optional[str], user_email: Optional[str]):
-    """Background task: download audio, transcribe with OpenAI, summarize, email."""
+def process_recording_and_email(
+    recording_url: str,
+    call_sid: Optional[str],
+    user_email: Optional[str],
+) -> None:
+    """
+    Background task:
+    - download audio from Twilio
+    - transcribe with OpenAI
+    - summarize
+    - email to the user
+    """
     # Twilio RecordingUrl usually needs an extension (e.g. .mp3) to fetch audio.
     audio_url = recording_url + ".mp3"
 
@@ -121,7 +190,7 @@ def process_recording_and_email(recording_url: str, call_sid: Optional[str], use
         model="gpt-4o-transcribe",
         file=audio_file,
     )
-    transcript_text = transcription.text
+    transcript_text: str = transcription.text
 
     # 2) Summarize as an email
     summary_response = openai_client.responses.create(
@@ -135,16 +204,18 @@ def process_recording_and_email(recording_url: str, call_sid: Optional[str], use
 
     # Extract the plain text from the responses output
     try:
-        summary_text = summary_response.output[0].content[0].text
+        summary_text = str(summary_response.output[0].content[0].text)
     except Exception:
-        summary_text = transcript_text  # Fallback – send raw transcript
+        # Fallback – send raw transcript
+        summary_text = transcript_text
 
     to_email = user_email or DEFAULT_SUMMARY_EMAIL_TO
     if to_email:
         send_summary_email(summary_text, call_sid, to_email)
 
-
-# --- API endpoints ---
+# =========================================================
+# API endpoints
+# =========================================================
 
 @app.post("/calls/start")
 async def start_call(payload: StartCallRequest):
@@ -152,6 +223,18 @@ async def start_call(payload: StartCallRequest):
     Called by the iOS app via CallService.
     Starts a Twilio outbound call and sets up a recording callback.
     """
+    if not TWILIO_CONFIG_OK:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Twilio not configured. Missing: {', '.join(MISSING_TWILIO_CONFIG)}",
+        )
+
+    if not PUBLIC_URL_CONFIG_OK:
+        raise HTTPException(
+            status_code=500,
+            detail="PUBLIC_BASE_URL must be set so Twilio can reach your webhooks.",
+        )
+
     to_number = normalize_phone_number(payload.phoneNumber)
     if not to_number:
         raise HTTPException(status_code=400, detail="Invalid phone number.")
@@ -160,7 +243,7 @@ async def start_call(payload: StartCallRequest):
     if not user_email:
         raise HTTPException(
             status_code=400,
-            detail="No email provided and SUMMARY_EMAIL_TO is not set."
+            detail="No email provided and SUMMARY_EMAIL_TO is not set.",
         )
 
     recording_callback = (
