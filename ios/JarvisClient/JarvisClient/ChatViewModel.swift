@@ -1,162 +1,208 @@
 // File: ios/JarvisClient/JarvisClient/ChatViewModel.swift
-// Action: REPLACE entire file
-// Purpose: Chat state + backend calls + call-planning prompt per Runbook v14.
+// Purpose: Chat view model with:
+//  - Local ChatMessage model for UI
+//  - Agent name (user-renamable, default "SideKick")
+//  - READY_TO_CALL → CallService hook
+//  - Safe stubbed sendToBackend (no JSON / no network)
 
 import Foundation
 import SwiftUI
 
+struct ChatMessage: Identifiable, Codable, Equatable {
+    enum Role: String, Codable {
+        case me
+        case bot
+        case system
+    }
+
+    let id: UUID
+    let role: Role
+    var text: String
+    let timestamp: Date
+
+    init(
+        id: UUID = UUID(),
+        role: Role,
+        text: String,
+        timestamp: Date = .init()
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.timestamp = timestamp
+    }
+}
+
 @MainActor
 final class ChatViewModel: ObservableObject {
-    @Published var messages: [Message] = []
+    @Published var messages: [ChatMessage] = []
+    @Published var isSending: Bool = false
 
-    // Backend response: { "reply": "..." }
-    private struct AskResponse: Decodable {
-        let reply: String
-    }
+    /// Current assistant / agent display name (shown in the header).
+    @Published var agentName: String
 
-    private struct BackendAPIError: LocalizedError {
-        let statusCode: Int
-        let body: String
+    /// Optional: email to send summaries to; can be set from login/profile.
+    var userEmail: String?
 
-        var errorDescription: String? {
-            "HTTP \(statusCode): \(body)"
+    private let agentNameKey = "agentName"
+
+    init(userEmail: String? = nil) {
+        self.userEmail = userEmail
+
+        let stored = UserDefaults.standard
+            .string(forKey: agentNameKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let stored, !stored.isEmpty {
+            self.agentName = stored
+        } else {
+            self.agentName = "SideKick"
         }
     }
 
-    init() {
-        if messages.isEmpty {
-            let welcome = Message(
-                role: .assistant,
-                content: "Hi, I’m Jarvis. Tell me what you’re working on and I’ll help with planning, calls, and messages."
-            )
-            messages = [welcome]
-        }
+    // MARK: - Agent name
+
+    /// Update the agent name and persist it.
+    /// Empty / whitespace-only values snap back to the default "SideKick".
+    func updateAgentName(_ newName: String) {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let final = trimmed.isEmpty ? "SideKick" : trimmed
+        agentName = final
+        UserDefaults.standard.set(final, forKey: agentNameKey)
     }
 
-    /// Entry point from ContentView.
-    func sendUserMessage(_ text: String) async {
+    // MARK: - Sending
+
+    func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // 1) Append user message to timeline
-        let userMessage = Message(role: .user, content: trimmed)
+        let userMessage = ChatMessage(role: .me, text: trimmed)
         messages.append(userMessage)
+        isSending = true
 
-        // 2) Build prompt from full history + call-planning rules
-        let promptToSend = buildPromptFromConversation(latestUserText: trimmed)
+        sendToBackend(prompt: trimmed) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+                self.isSending = false
 
-        // 3) Call backend
-        do {
-            let replyText = try await askBackend(prompt: promptToSend)
-            let replyMessage = Message(role: .assistant, content: replyText)
-            messages.append(replyMessage)
-        } catch {
-            let friendly = "I hit a network error talking to the backend: \(error.localizedDescription)"
-            let errorMessage = Message(role: .assistant, content: friendly)
-            messages.append(errorMessage)
-        }
-    }
+                switch result {
+                case .success(let replyText):
+                    self.handleAssistantReply(replyText, originalUserText: trimmed)
 
-    // MARK: - Prompt helpers
-
-    /// Builds a single prompt string from the whole conversation.
-    /// This gives the backend context (numbers + “call it”, etc.).
-    private func buildPromptFromConversation(latestUserText: String) -> String {
-        // Turn messages into a readable transcript.
-        let historyLines = messages.map { msg -> String in
-            let roleLabel: String
-            switch msg.role {
-            case .user:      roleLabel = "User"
-            case .assistant: roleLabel = "Assistant"
-            case .system:    roleLabel = "System"
-            @unknown default: roleLabel = "Other"
+                case .failure(let error):
+                    let errorMessage = ChatMessage(
+                        role: .bot,
+                        text: "Sorry, something went wrong: \(error.localizedDescription)"
+                    )
+                    self.messages.append(errorMessage)
+                }
             }
-            return "\(roleLabel): \(msg.content)"
-        }.joined(separator: "\n")
-
-        // Base Jarvis behavior
-        var systemInstructions = """
-        You are Jarvis, a project and communications assistant running inside an iOS app.
-        Be concise, friendly, and practical. You see the full conversation transcript and
-        should respond as the Assistant in plain text (no JSON).
-
-        If the user is just chatting, respond normally with helpful answers.
-        """
-
-        // Extra call-planning behavior when relevant
-        if shouldTriggerCallPlanning(for: latestUserText) {
-            systemInstructions += """
-
-
-
-            CALL-PLANNING MODE:
-
-            The user may want to make a phone call. When you detect that:
-            - Ask for WHO we are calling (name / company) and, if missing, their phone number.
-            - Ask for the main GOAL of the conversation.
-            - Ask WHEN they want the call (now, later today, specific time, etc.).
-            - Ask for any KEY POINTS they want us to hit on the call.
-
-            If the user types a phone number (e.g. 7819345422) and then later says
-            "call it", "call that number", "call them", or similar, assume they
-            mean the most recent phone number mentioned in the conversation.
-
-            Once you have enough information and the user clearly confirms they are ready,
-            summarize the call plan and include the exact phrase: READY_TO_CALL
-            in your last sentence so the system knows the plan is complete.
-            """
         }
-
-        return """
-        \(systemInstructions)
-
-        ---
-        Conversation so far:
-        \(historyLines)
-
-        Assistant (your next reply only):
-        """
     }
 
-    private func shouldTriggerCallPlanning(for text: String) -> Bool {
-        let lower = text.lowercased()
-        return lower.contains("phone call")
-            || lower.contains("call this person")
-            || lower.contains("schedule a call")
-            || lower.contains("schedule a phone call")
-            || lower.contains("call it")
-            || lower.contains("call them")
-            || lower.hasPrefix("/call")
+    // MARK: - Assistant reply handling
+
+    private func handleAssistantReply(_ replyText: String, originalUserText: String) {
+        // 1) First, see if this is telling us to start a call.
+        if handleCallIntentIfPresent(in: replyText, originalUserText: originalUserText) {
+            return
+        }
+
+        // 2) Otherwise, treat as a normal bot message.
+        let botMessage = ChatMessage(role: .bot, text: replyText)
+        messages.append(botMessage)
     }
 
-    // MARK: - Backend call
-
-    private func askBackend(prompt: String) async throws -> String {
-        let url = Secrets.askEndpoint
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-
-        // Headers from Secrets (includes Authorization + JSON content type)
-        let headers = Secrets.headers(json: true)
-        for (key, value) in headers {
-            request.setValue(value, forHTTPHeaderField: key)
+    /// Looks for a READY_TO_CALL marker and phone number in the assistant text.
+    /// If found, starts the backend Twilio call and posts a friendly message instead
+    /// of the raw control text.
+    private func handleCallIntentIfPresent(
+        in rawText: String,
+        originalUserText: String
+    ) -> Bool {
+        guard rawText.uppercased().contains("READY_TO_CALL") else {
+            return false
         }
 
-        let body: [String: Any] = ["prompt": prompt]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
+        // Very forgiving parse: search for a line containing "Number:" or "Phone:"
+        // and collect digits / optional +.
+        let lines = rawText.components(separatedBy: .newlines)
+        var phoneCandidate: String?
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-
-        guard let http = response as? HTTPURLResponse else {
-            throw URLError(.badServerResponse)
+        for line in lines {
+            let lower = line.lowercased()
+            if lower.contains("number:") || lower.contains("phone:") {
+                if let idx = line.firstIndex(of: ":") {
+                    let afterColon = line[line.index(after: idx)...]
+                    let digits = afterColon.filter { $0.isNumber || $0 == "+" }
+                    if !digits.isEmpty {
+                        phoneCandidate = String(digits)
+                        break
+                    }
+                }
+            }
         }
 
-        guard (200..<300).contains(http.statusCode) else {
-            let bodyString = String(data: data, encoding: .utf8) ?? ""
-            throw BackendAPIError(statusCode: http.statusCode, body: bodyString)
+        guard let rawNumber = phoneCandidate else {
+            // We saw READY_TO_CALL but couldn't find a number – surface a clear message.
+            let fallback = ChatMessage(
+                role: .bot,
+                text: """
+                      I tried to start the call, but I couldn't parse a phone number \
+                      from this response:
+
+                      \(rawText)
+                      """
+            )
+            messages.append(fallback)
+            return true
         }
 
-        let decoded = try JSONDecoder().decode(AskResponse.self, from: data)
-        return decoded.reply
+        let friendly = ChatMessage(
+            role: .bot,
+            text: "I’m calling now and will email you a summary of the conversation once it’s finished."
+        )
+        messages.append(friendly)
+
+        // Fire-and-forget backend call; we don’t block the UI on this.
+        CallService.shared.startCall(
+            phoneNumber: rawNumber,
+            instructions: originalUserText,
+            userEmail: userEmail
+        ) { [weak self] result in
+            Task { @MainActor in
+                guard let self else { return }
+
+                switch result {
+                case .success:
+                    // Optional: append a subtle “call started” marker if you want.
+                    break
+
+                case .failure(let error):
+                    let errorMessage = ChatMessage(
+                        role: .bot,
+                        text: "I tried to start the call, but there was an error: \(error.localizedDescription)"
+                    )
+                    self.messages.append(errorMessage)
+                }
+            }
+        }
+
+        return true
+    }
+
+    // MARK: - Backend wiring (temporary stub)
+
+    /// TEMP: Stubbed backend so we *never* hit JSONSerialization here.
+    /// Replace this later with your real API client once everything is stable.
+    private func sendToBackend(
+        prompt: String,
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        // Simulate a short network delay and return a canned response.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            completion(.success("Stub reply from backend – replace sendToBackend in ChatViewModel.swift."))
+        }
     }
 }

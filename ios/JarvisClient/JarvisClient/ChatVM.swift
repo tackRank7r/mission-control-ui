@@ -1,16 +1,10 @@
-//
-//  ChatVM.swift
-//  JarvisClient
-//
- //
+// File: ios/JarvisClient/JarvisClient/ChatVM.swift
+// Action: REPLACE entire file
+// Purpose: Simple connectivity checker that posts to /api/chat/connect using the
+//          same base URL as the main app (Secrets.baseURL).
 
 import Foundation
 import Combine
-
-enum Config {
-    // <-- Replace with your real base URL (no trailing slash)
-    static let baseURL = "https://YOUR-SERVER.com"
-}
 
 final class ChatVM: ObservableObject {
     @Published var isConnecting = false
@@ -21,21 +15,26 @@ final class ChatVM: ObservableObject {
         isConnecting = true
         errorText = nil
 
-        guard let url = URL(string: "\(Config.baseURL)/api/chat/connect") else {
-            self.errorText = "Bad URL. Check base URL."
-            self.isConnecting = false
-            return
-        }
+        // Use the shared backend base URL (no trailing slash).
+        let url = Secrets.baseURL.appendingPathComponent("api/chat/connect")
 
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try? JSONSerialization.data(withJSONObject: ["client":"ios"])
+        req.httpBody = try? JSONSerialization.data(
+            withJSONObject: ["client": "ios"],
+            options: []
+        )
 
         URLSession.shared.dataTask(with: req) { _, resp, err in
             DispatchQueue.main.async {
                 self.isConnecting = false
-                if let err = err { self.errorText = err.localizedDescription; return }
+
+                if let err = err {
+                    self.errorText = err.localizedDescription
+                    return
+                }
+
                 if let http = resp as? HTTPURLResponse, http.statusCode == 404 {
                     self.errorText = "Server error (404) — route missing: \(url.absoluteString)"
                 }

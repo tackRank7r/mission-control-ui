@@ -1,5 +1,6 @@
-// File: ios/JarvisClient/JarvisClient/JarvisClientApp.swift
-// Action: REPLACE entire file
+//
+//  JarvisClientApp.swift
+//
 
 import SwiftUI
 
@@ -7,7 +8,7 @@ import SwiftUI
 struct JarvisClientApp: App {
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootShellView()
         }
     }
 }
