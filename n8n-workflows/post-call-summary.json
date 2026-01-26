@@ -1,0 +1,358 @@
+{
+  "name": "Jarvis Post-Call Summary",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "call-completed",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-completed",
+      "name": "Call Completed Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "call-completed"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/call/{{ $json.body.call_task_id }}",
+        "options": {}
+      },
+      "id": "get-call-details",
+      "name": "Get Call Details",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jarvis-auth",
+          "name": "Jarvis Backend Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-transcript",
+              "leftValue": "={{ $json.call_task.transcript }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-transcript",
+      "name": "Has Transcript?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gpt-4o-mini"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are a call summarization assistant. Summarize the following phone call transcript concisely. Include:\n1. Call outcome (successful, unsuccessful, callback needed, etc.)\n2. Key points discussed\n3. Any action items or follow-ups needed\n4. Overall sentiment of the conversation\n\nKeep the summary under 200 words.",
+              "role": "system"
+            },
+            {
+              "content": "Call Details:\n- Target: {{ $json.call_task.target_name }} ({{ $json.call_task.target_phone }})\n- Objective: {{ $json.call_task.objective }}\n- Duration: {{ $json.call_task.duration_seconds }} seconds\n\nTranscript:\n{{ $json.call_task.transcript }}",
+              "role": "user"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "generate-summary",
+      "name": "Generate AI Summary",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.4,
+      "position": [660, -100],
+      "credentials": {
+        "openAiApi": {
+          "id": "openai-creds",
+          "name": "OpenAI API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/call/{{ $('Call Completed Webhook').item.json.body.call_task_id }}/complete",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "result_summary",
+              "value": "={{ $json.message.content }}"
+            },
+            {
+              "name": "result_status",
+              "value": "={{ $('Call Completed Webhook').item.json.body.call_status || 'completed' }}"
+            },
+            {
+              "name": "duration_seconds",
+              "value": "={{ $('Call Completed Webhook').item.json.body.duration || 0 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "save-summary",
+      "name": "Save Summary to Backend",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -100],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jarvis-auth",
+          "name": "Jarvis Backend Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/call/{{ $('Call Completed Webhook').item.json.body.call_task_id }}/complete",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "result_summary",
+              "value": "Call completed. No transcript available for summarization."
+            },
+            {
+              "name": "result_status",
+              "value": "={{ $('Call Completed Webhook').item.json.body.call_status || 'completed' }}"
+            },
+            {
+              "name": "duration_seconds",
+              "value": "={{ $('Call Completed Webhook').item.json.body.duration || 0 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "save-no-transcript",
+      "name": "Save Without Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 100],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jarvis-auth",
+          "name": "Jarvis Backend Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/log",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "workflow",
+              "value": "post-call-summary"
+            },
+            {
+              "name": "node",
+              "value": "Generate AI Summary"
+            },
+            {
+              "name": "level",
+              "value": "info"
+            },
+            {
+              "name": "message",
+              "value": "Call summary generated and saved"
+            },
+            {
+              "name": "call_task_id",
+              "value": "={{ $('Call Completed Webhook').item.json.body.call_task_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-success",
+      "name": "Log Summary Success",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -100]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/log",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "workflow",
+              "value": "post-call-summary"
+            },
+            {
+              "name": "node",
+              "value": "Save Without Summary"
+            },
+            {
+              "name": "level",
+              "value": "info"
+            },
+            {
+              "name": "message",
+              "value": "Call completed without transcript"
+            },
+            {
+              "name": "call_task_id",
+              "value": "={{ $('Call Completed Webhook').item.json.body.call_task_id }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-no-transcript",
+      "name": "Log No Transcript",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 100]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "completed"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "final-response",
+      "name": "Final Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1320, 0]
+    }
+  ],
+  "connections": {
+    "Call Completed Webhook": {
+      "main": [
+        [
+          {
+            "node": "Get Call Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Call Details": {
+      "main": [
+        [
+          {
+            "node": "Has Transcript?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Transcript?": {
+      "main": [
+        [
+          {
+            "node": "Generate AI Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save Without Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate AI Summary": {
+      "main": [
+        [
+          {
+            "node": "Save Summary to Backend",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Summary to Backend": {
+      "main": [
+        [
+          {
+            "node": "Log Summary Success",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Without Summary": {
+      "main": [
+        [
+          {
+            "node": "Log No Transcript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Summary Success": {
+      "main": [
+        [
+          {
+            "node": "Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log No Transcript": {
+      "main": [
+        [
+          {
+            "node": "Final Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["jarvis", "calls", "summary", "ai"]
+}

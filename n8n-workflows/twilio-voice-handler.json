@@ -1,0 +1,210 @@
+{
+  "name": "Jarvis Twilio Voice Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "twilio-voice",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-voice",
+      "name": "Twilio Voice Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "twilio-voice"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/call/lookup",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "twilio_call_sid",
+              "value": "={{ $json.body.CallSid }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "lookup-call-task",
+      "name": "Lookup Call Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jarvis-auth",
+          "name": "Jarvis Backend Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-task",
+              "leftValue": "={{ $json.call_task }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-task-exists",
+      "name": "Task Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.twiml }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-initial-twiml",
+      "name": "Respond with Initial TwiML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [660, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Response><Say voice=\"Polly.Matthew\">I'm sorry, there was an error connecting this call. Please try again later.</Say><Hangup/></Response>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-error-twiml",
+      "name": "Respond with Error TwiML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/log",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "workflow",
+              "value": "twilio-voice-handler"
+            },
+            {
+              "name": "node",
+              "value": "Twilio Voice Webhook"
+            },
+            {
+              "name": "level",
+              "value": "error"
+            },
+            {
+              "name": "message",
+              "value": "No call task found for CallSid"
+            },
+            {
+              "name": "context",
+              "value": "={{ JSON.stringify({ call_sid: $('Twilio Voice Webhook').item.json.body.CallSid }) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-no-task-error",
+      "name": "Log No Task Error",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 100]
+    }
+  ],
+  "connections": {
+    "Twilio Voice Webhook": {
+      "main": [
+        [
+          {
+            "node": "Lookup Call Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Call Task": {
+      "main": [
+        [
+          {
+            "node": "Task Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Task Found?": {
+      "main": [
+        [
+          {
+            "node": "Respond with Initial TwiML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond with Error TwiML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond with Error TwiML": {
+      "main": [
+        [
+          {
+            "node": "Log No Task Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["jarvis", "calls", "twilio", "voice"]
+}

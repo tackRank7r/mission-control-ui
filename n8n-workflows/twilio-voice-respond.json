@@ -1,0 +1,306 @@
+{
+  "name": "Jarvis Voice Conversation Turn",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "voice-respond",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-respond",
+      "name": "Voice Response Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "voice-respond"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/call/lookup",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "twilio_call_sid",
+              "value": "={{ $json.body.CallSid }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "lookup-call",
+      "name": "Lookup Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jarvis-auth",
+          "name": "Jarvis Backend Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/call/{{ $json.call_task.id }}/turn",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "user_speech",
+              "value": "={{ $('Voice Response Webhook').item.json.body.SpeechResult || '' }}"
+            },
+            {
+              "name": "twilio_call_sid",
+              "value": "={{ $('Voice Response Webhook').item.json.body.CallSid }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "process-turn",
+      "name": "Process Conversation Turn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jarvis-auth",
+          "name": "Jarvis Backend Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "should-end",
+              "leftValue": "={{ $json.should_end_call }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-end-call",
+      "name": "Should End Call?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.twiml }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-end-twiml",
+      "name": "Respond End Call TwiML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [880, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.twiml }}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/xml"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond-continue-twiml",
+      "name": "Respond Continue TwiML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [880, 100]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/log",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "workflow",
+              "value": "voice-respond"
+            },
+            {
+              "name": "node",
+              "value": "Process Turn"
+            },
+            {
+              "name": "level",
+              "value": "info"
+            },
+            {
+              "name": "message",
+              "value": "Conversation turn processed"
+            },
+            {
+              "name": "call_task_id",
+              "value": "={{ $('Lookup Call').item.json.call_task.id }}"
+            },
+            {
+              "name": "context",
+              "value": "={{ JSON.stringify({ user_speech: $('Voice Response Webhook').item.json.body.SpeechResult, should_end: $json.should_end_call }) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-turn",
+      "name": "Log Turn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -100]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/log",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "workflow",
+              "value": "voice-respond"
+            },
+            {
+              "name": "node",
+              "value": "Process Turn"
+            },
+            {
+              "name": "level",
+              "value": "info"
+            },
+            {
+              "name": "message",
+              "value": "Conversation continuing"
+            },
+            {
+              "name": "call_task_id",
+              "value": "={{ $('Lookup Call').item.json.call_task.id }}"
+            },
+            {
+              "name": "context",
+              "value": "={{ JSON.stringify({ user_speech: $('Voice Response Webhook').item.json.body.SpeechResult }) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-continue",
+      "name": "Log Continue",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, 100]
+    }
+  ],
+  "connections": {
+    "Voice Response Webhook": {
+      "main": [
+        [
+          {
+            "node": "Lookup Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Call": {
+      "main": [
+        [
+          {
+            "node": "Process Conversation Turn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Conversation Turn": {
+      "main": [
+        [
+          {
+            "node": "Should End Call?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Should End Call?": {
+      "main": [
+        [
+          {
+            "node": "Respond End Call TwiML",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Continue TwiML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond End Call TwiML": {
+      "main": [
+        [
+          {
+            "node": "Log Turn",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond Continue TwiML": {
+      "main": [
+        [
+          {
+            "node": "Log Continue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["jarvis", "calls", "twilio", "voice", "conversation"]
+}

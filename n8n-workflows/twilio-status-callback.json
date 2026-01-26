@@ -1,0 +1,323 @@
+{
+  "name": "Jarvis Twilio Status Callback",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "twilio-status",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "webhook-status",
+      "name": "Twilio Status Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "twilio-status"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/call/lookup",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "twilio_call_sid",
+              "value": "={{ $json.body.CallSid }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "lookup-call",
+      "name": "Lookup Call Task",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [220, 0],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "jarvis-auth",
+          "name": "Jarvis Backend Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-task",
+              "leftValue": "={{ $json.call_task }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-task",
+      "name": "Task Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-completed",
+              "leftValue": "={{ $('Twilio Status Webhook').item.json.body.CallStatus }}",
+              "rightValue": "completed",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "options": {}
+      },
+      "id": "check-call-ended",
+      "name": "Call Ended?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [660, -100]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.N8N_WEBHOOK_URL }}/call-completed",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "call_task_id",
+              "value": "={{ $('Lookup Call Task').item.json.call_task.id }}"
+            },
+            {
+              "name": "call_status",
+              "value": "={{ $('Twilio Status Webhook').item.json.body.CallStatus }}"
+            },
+            {
+              "name": "duration",
+              "value": "={{ $('Twilio Status Webhook').item.json.body.CallDuration || 0 }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "trigger-summary",
+      "name": "Trigger Post-Call Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, -200]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/log",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "workflow",
+              "value": "twilio-status-callback"
+            },
+            {
+              "name": "node",
+              "value": "Status Update"
+            },
+            {
+              "name": "level",
+              "value": "info"
+            },
+            {
+              "name": "message",
+              "value": "Call status update: {{ $('Twilio Status Webhook').item.json.body.CallStatus }}"
+            },
+            {
+              "name": "call_task_id",
+              "value": "={{ $('Lookup Call Task').item.json.call_task.id }}"
+            },
+            {
+              "name": "context",
+              "value": "={{ JSON.stringify({ status: $('Twilio Status Webhook').item.json.body.CallStatus, duration: $('Twilio Status Webhook').item.json.body.CallDuration }) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-status-update",
+      "name": "Log Status Update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.JARVIS_BACKEND_URL }}/n8n/log",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "workflow",
+              "value": "twilio-status-callback"
+            },
+            {
+              "name": "node",
+              "value": "Twilio Status Webhook"
+            },
+            {
+              "name": "level",
+              "value": "warning"
+            },
+            {
+              "name": "message",
+              "value": "Status callback for unknown call"
+            },
+            {
+              "name": "context",
+              "value": "={{ JSON.stringify({ call_sid: $('Twilio Status Webhook').item.json.body.CallSid, status: $('Twilio Status Webhook').item.json.body.CallStatus }) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-unknown-call",
+      "name": "Log Unknown Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 100]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "status",
+              "value": "received"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "response",
+      "name": "Response",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1100, 0]
+    }
+  ],
+  "connections": {
+    "Twilio Status Webhook": {
+      "main": [
+        [
+          {
+            "node": "Lookup Call Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Lookup Call Task": {
+      "main": [
+        [
+          {
+            "node": "Task Found?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Task Found?": {
+      "main": [
+        [
+          {
+            "node": "Call Ended?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Unknown Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Ended?": {
+      "main": [
+        [
+          {
+            "node": "Trigger Post-Call Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Status Update",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Trigger Post-Call Summary": {
+      "main": [
+        [
+          {
+            "node": "Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Status Update": {
+      "main": [
+        [
+          {
+            "node": "Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Unknown Call": {
+      "main": [
+        [
+          {
+            "node": "Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": ["jarvis", "calls", "twilio", "status"]
+}
