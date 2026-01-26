@@ -1,11 +1,12 @@
-# File: .gitignore
-# Action: REPLACE entire file
-# Purpose: Ignore build artifacts and local secrets for CGPTPROJECT.
+# Environment variables and secrets
+.env
+*.env
+.env.local
 
-# ---- macOS cruft ----
+# macOS
 .DS_Store
 
-# ---- Python ----
+# Python
 __pycache__/
 *.py[cod]
 *.pyo
@@ -14,11 +15,10 @@ __pycache__/
 .venv/
 venv/
 env/
-.env
 *.sqlite3
 jarvis.db
 
-# ---- iOS / Xcode ----
+# iOS / Xcode
 DerivedData/
 build/
 *.xcuserstate
@@ -28,12 +28,13 @@ build/
 ios/JarvisClient/JarvisClient.xcodeproj/project.xcworkspace/xcuserdata/
 ios/JarvisClient/JarvisClient.xcodeproj/xcuserdata/
 
-# ---- Fastlane / screenshots (if used) ----
+# Fastlane / screenshots (if used)
 fastlane/report.xml
 fastlane/Preview.html
 fastlane/screenshots/
 fastlane/test_output/
 
-# ---- Local config / secrets ----
+# Local config / secrets
 Secrets.swift
 *.local.swift
+*.local
