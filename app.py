@@ -16,9 +16,12 @@ import re
 import uuid
 import json
 import traceback
+import hashlib
 from datetime import datetime, timezone
 from typing import Tuple, Optional
 from functools import wraps
+
+import httpx
 
 from flask import Flask, jsonify, request, Response
 from flask_sqlalchemy import SQLAlchemy
@@ -67,6 +70,10 @@ TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", os.getenv("TWILIO_PHONE_NUMBER", ""))
 TWILIO_VOICE_URL = os.getenv("TWILIO_VOICE_URL", "")
+
+# ElevenLabs config
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default: Rachel
 
 # n8n webhook URLs
 N8N_BASE_URL = os.getenv("N8N_BASE_URL", "https://fdaf.app.n8n.cloud")
@@ -750,6 +757,18 @@ def cancel_call(call_id):
 # Twilio Voice Webhook (TwiML responses)
 # ========================================
 
+def _add_speech_to_twiml(twiml_element, text: str, base_url: str):
+    """Add speech to TwiML element - uses ElevenLabs if available, otherwise Polly."""
+    if ELEVENLABS_API_KEY:
+        # Generate audio with ElevenLabs and play it
+        cache_key = generate_and_cache_audio(text, use_elevenlabs=True)
+        if cache_key:
+            twiml_element.play(f"{base_url}audio/{cache_key}")
+            return
+    # Fallback to Polly
+    twiml_element.say(text, voice="Polly.Matthew")
+
+
 @app.route("/twilio/voice", methods=["POST"])
 def twilio_voice_webhook():
     """
@@ -761,6 +780,7 @@ def twilio_voice_webhook():
 
     try:
         call_sid = request.values.get("CallSid", "")
+        base_url = request.url_root
 
         # Find the call task by Twilio SID
         call = CallTask.query.filter_by(twilio_call_sid=call_sid).first()
@@ -776,15 +796,26 @@ def twilio_voice_webhook():
         # Gather speech input
         gather = Gather(
             input="speech",
-            action=f"{request.url_root}twilio/voice/respond",
+            action=f"{base_url}twilio/voice/respond",
             speech_timeout="auto",
             language="en-US"
         )
-        gather.say(greeting, voice="Polly.Matthew")
+
+        # Use ElevenLabs if available
+        if ELEVENLABS_API_KEY:
+            cache_key = generate_and_cache_audio(greeting, use_elevenlabs=True)
+            if cache_key:
+                gather.play(f"{base_url}audio/{cache_key}")
+            else:
+                gather.say(greeting, voice="Polly.Matthew")
+        else:
+            gather.say(greeting, voice="Polly.Matthew")
+
         response.append(gather)
 
         # If no input, say goodbye
-        response.say("I didn't hear anything. Goodbye.", voice="Polly.Matthew")
+        goodbye_msg = "I didn't hear anything. Goodbye."
+        _add_speech_to_twiml(response, goodbye_msg, base_url)
         response.hangup()
 
         return Response(str(response), mimetype="application/xml")
@@ -839,12 +870,13 @@ def twilio_voice_respond():
             })
 
         response = VoiceResponse()
+        base_url = request.url_root
 
         # Check for conversation end signals
         end_signals = ["goodbye", "thank you", "that's all", "bye", "have a nice day"]
         if any(signal in speech_result.lower() for signal in end_signals):
-            response.say(ai_response, voice="Polly.Matthew")
-            response.say("Thank you for your time. Goodbye!", voice="Polly.Matthew")
+            _add_speech_to_twiml(response, ai_response, base_url)
+            _add_speech_to_twiml(response, "Thank you for your time. Goodbye!", base_url)
             response.hangup()
 
             # Mark call as completed
@@ -857,14 +889,24 @@ def twilio_voice_respond():
             # Continue conversation
             gather = Gather(
                 input="speech",
-                action=f"{request.url_root}twilio/voice/respond",
+                action=f"{base_url}twilio/voice/respond",
                 speech_timeout="auto",
                 language="en-US"
             )
-            gather.say(ai_response, voice="Polly.Matthew")
+
+            # Use ElevenLabs if available
+            if ELEVENLABS_API_KEY:
+                cache_key = generate_and_cache_audio(ai_response, use_elevenlabs=True)
+                if cache_key:
+                    gather.play(f"{base_url}audio/{cache_key}")
+                else:
+                    gather.say(ai_response, voice="Polly.Matthew")
+            else:
+                gather.say(ai_response, voice="Polly.Matthew")
+
             response.append(gather)
 
-            response.say("I didn't hear a response. Goodbye.", voice="Polly.Matthew")
+            _add_speech_to_twiml(response, "I didn't hear a response. Goodbye.", base_url)
             response.hangup()
 
         return Response(str(response), mimetype="application/xml")
@@ -1062,6 +1104,76 @@ def _openai_tts(text: str) -> bytes:
     except Exception:
         res = client.audio.speech.create(model="tts-1", voice="alloy", input=text)
         return res.read()
+
+
+# In-memory audio cache for Twilio playback
+_audio_cache = {}
+
+
+def _elevenlabs_tts(text: str, voice_id: str = None) -> bytes:
+    """Generate speech using ElevenLabs API."""
+    if not ELEVENLABS_API_KEY:
+        raise RuntimeError("elevenlabs_not_configured")
+
+    voice = voice_id or ELEVENLABS_VOICE_ID
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
+
+    headers = {
+        "Accept": "audio/mpeg",
+        "Content-Type": "application/json",
+        "xi-api-key": ELEVENLABS_API_KEY
+    }
+
+    payload = {
+        "text": text,
+        "model_id": "eleven_monolingual_v1",
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75
+        }
+    }
+
+    with httpx.Client(timeout=30.0) as client:
+        response = client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        return response.content
+
+
+def generate_and_cache_audio(text: str, use_elevenlabs: bool = True) -> str:
+    """Generate audio and return a cache key for retrieval."""
+    # Create a hash of the text for the cache key
+    cache_key = hashlib.md5(text.encode()).hexdigest()[:16]
+
+    if cache_key not in _audio_cache:
+        try:
+            if use_elevenlabs and ELEVENLABS_API_KEY:
+                audio_bytes = _elevenlabs_tts(text)
+            else:
+                # Fallback to Polly or OpenAI
+                try:
+                    audio_bytes = _polly_tts(text)
+                except Exception:
+                    audio_bytes = _openai_tts(text)
+
+            _audio_cache[cache_key] = {
+                "audio": audio_bytes,
+                "created": datetime.utcnow()
+            }
+        except Exception as e:
+            app.logger.exception(f"TTS generation failed: {e}")
+            return None
+
+    return cache_key
+
+
+@app.get("/audio/<cache_key>")
+def get_cached_audio(cache_key):
+    """Serve cached audio for Twilio playback."""
+    if cache_key not in _audio_cache:
+        return "Audio not found", 404
+
+    audio_data = _audio_cache[cache_key]["audio"]
+    return Response(audio_data, status=200, mimetype="audio/mpeg")
 
 
 @app.post("/speak")
