@@ -1143,14 +1143,18 @@ def _elevenlabs_tts(text: str, voice_id: str = None) -> bytes:
 
 def generate_and_cache_audio(text: str, use_elevenlabs: bool = True) -> str:
     """Generate audio and return a cache key for retrieval."""
-    # Create a hash of the text for the cache key
-    cache_key = hashlib.md5(text.encode()).hexdigest()[:16]
+    # Include voice ID in cache key so changing voice generates new audio
+    voice_key = ELEVENLABS_VOICE_ID if (use_elevenlabs and ELEVENLABS_API_KEY) else "polly"
+    cache_key = hashlib.md5(f"{voice_key}:{text}".encode()).hexdigest()[:16]
 
     if cache_key not in _audio_cache:
         try:
             if use_elevenlabs and ELEVENLABS_API_KEY:
+                app.logger.info(f"Generating ElevenLabs audio with voice: {ELEVENLABS_VOICE_ID}")
                 audio_bytes = _elevenlabs_tts(text)
+                app.logger.info(f"ElevenLabs audio generated successfully, {len(audio_bytes)} bytes")
             else:
+                app.logger.info("ElevenLabs not configured, falling back to Polly")
                 # Fallback to Polly or OpenAI
                 try:
                     audio_bytes = _polly_tts(text)
