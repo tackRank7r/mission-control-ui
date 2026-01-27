@@ -1182,6 +1182,34 @@ def get_cached_audio(cache_key):
     return Response(audio_data, status=200, mimetype="audio/mpeg")
 
 
+@app.get("/test-elevenlabs")
+@require_bearer
+def test_elevenlabs():
+    """Debug endpoint to test ElevenLabs TTS."""
+    result = {
+        "elevenlabs_configured": bool(ELEVENLABS_API_KEY),
+        "voice_id": ELEVENLABS_VOICE_ID,
+        "api_key_prefix": ELEVENLABS_API_KEY[:10] + "..." if ELEVENLABS_API_KEY else None
+    }
+
+    if not ELEVENLABS_API_KEY:
+        result["error"] = "ELEVENLABS_API_KEY not set"
+        return jsonify(result), 400
+
+    try:
+        test_text = "Hello, this is a test."
+        audio_bytes = _elevenlabs_tts(test_text)
+        result["success"] = True
+        result["audio_size"] = len(audio_bytes)
+        result["message"] = "ElevenLabs TTS working!"
+    except Exception as e:
+        result["success"] = False
+        result["error"] = str(e)
+        result["error_type"] = type(e).__name__
+
+    return jsonify(result)
+
+
 @app.post("/speak")
 @require_bearer
 def speak():
