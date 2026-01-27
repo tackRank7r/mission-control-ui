@@ -274,6 +274,8 @@ def diagnostics():
         "has_twilio_keys": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN),
         "has_twilio_from_number": bool(TWILIO_FROM_NUMBER),
         "has_twilio_voice_url": bool(TWILIO_VOICE_URL),
+        "has_elevenlabs": bool(ELEVENLABS_API_KEY),
+        "elevenlabs_voice_id": ELEVENLABS_VOICE_ID,
         "n8n_base_url": N8N_BASE_URL,
         "pending_calls": pending_calls,
         "recent_errors": [{"workflow": e.workflow_name, "message": e.message[:100], "ts": e.timestamp.isoformat()} for e in recent_errors]
