@@ -793,7 +793,7 @@ def twilio_voice_webhook():
             # Use the prepared script
             greeting = call.call_script.split("\n")[0] if "\n" in call.call_script else call.call_script
         else:
-            greeting = "Hello, this is Jarvis calling on behalf of my user. How can I help you today?"
+            greeting = "Hey there! This is Tori, calling on behalf of my user. How's it going?"
 
         # Gather speech input
         gather = Gather(
@@ -1050,10 +1050,12 @@ def _phone_agent_chat(call: 'CallTask', speech_result: str) -> str:
         messages = [{"role": "system", "content": system}]
 
         if call:
+            # Get last 10 turns to keep context window small and fast
             events = CallEvent.query.filter_by(
                 call_task_id=call.id,
                 event_type="turn"
-            ).order_by(CallEvent.timestamp.asc()).all()
+            ).order_by(CallEvent.timestamp.desc()).limit(10).all()
+            events.reverse()  # Put back in chronological order
 
             for event in events:
                 try:
@@ -1071,10 +1073,10 @@ def _phone_agent_chat(call: 'CallTask', speech_result: str) -> str:
         messages.append({"role": "user", "content": speech_result})
 
         completion = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=messages,
             temperature=0.8,
-            max_tokens=100
+            max_tokens=80
         )
 
         reply = (completion.choices[0].message.content or "").strip()
@@ -1209,8 +1211,10 @@ def _elevenlabs_tts(text: str, voice_id: str = None) -> bytes:
         "text": text,
         "model_id": "eleven_turbo_v2",
         "voice_settings": {
-            "stability": 0.5,
-            "similarity_boost": 0.75
+            "stability": 0.35,
+            "similarity_boost": 0.85,
+            "style": 0.3,
+            "use_speaker_boost": True
         }
     }
 
