@@ -860,7 +860,7 @@ def twilio_voice_respond():
                     ctx = json.loads(call.context)
                     context += f"Details: {json.dumps(ctx)}. "
 
-            prompt = f"{context}The person said: '{speech_result}'. Respond naturally and helpfully. Keep it brief."
+            prompt = f"{context}The person said: '{speech_result}'. Respond naturally in 1-2 short sentences max. Be concise."
             ai_response = _chat_llm(prompt)
         else:
             ai_response = "I'm sorry, I didn't catch that. Could you please repeat?"
@@ -1128,14 +1128,14 @@ def _elevenlabs_tts(text: str, voice_id: str = None) -> bytes:
 
     payload = {
         "text": text,
-        "model_id": "eleven_monolingual_v1",
+        "model_id": "eleven_turbo_v2",
         "voice_settings": {
             "stability": 0.5,
             "similarity_boost": 0.75
         }
     }
 
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=15.0) as client:
         response = client.post(url, json=payload, headers=headers)
         response.raise_for_status()
         return response.content
