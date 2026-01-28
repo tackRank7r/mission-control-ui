@@ -851,19 +851,11 @@ def twilio_voice_respond():
                 "text": speech_result
             })
 
-        # Generate AI response
+        # Generate AI response using phone agent with conversation history
         if speech_result:
-            context = ""
-            if call:
-                context = f"You are making a call to {call.target_name or 'a business'}. Objective: {call.objective or 'general inquiry'}. "
-                if call.context:
-                    ctx = json.loads(call.context)
-                    context += f"Details: {json.dumps(ctx)}. "
-
-            prompt = f"{context}The person said: '{speech_result}'. Respond naturally in 1-2 short sentences max. Be concise."
-            ai_response = _chat_llm(prompt)
+            ai_response = _phone_agent_chat(call, speech_result)
         else:
-            ai_response = "I'm sorry, I didn't catch that. Could you please repeat?"
+            ai_response = "Sorry, I didn't catch that. Could you say that again?"
 
         if call:
             log_call_event(call.id, "turn", {
@@ -976,6 +968,29 @@ def _extract_user_text(body: dict) -> str:
     return ""
 
 
+PHONE_AGENT_SYSTEM_PROMPT = """You are Tori, a friendly and natural-sounding AI phone assistant calling on behalf of your user.
+
+CONVERSATION RULES:
+- Speak naturally like a real person on a phone call. Use casual, warm language.
+- Keep responses to 1-3 short sentences. This is a phone call, not an essay.
+- Always end with a follow-up question or next step to keep the conversation going.
+- If the person answers your question, acknowledge their answer before moving on.
+- If you've accomplished the call objective, wrap up politely: "Great, that's everything I needed. Thanks so much for your help!"
+- Never say you're an AI unless directly asked. Just be helpful.
+- Don't use bullet points, lists, or any text formatting - this is spoken audio.
+- Use natural filler words occasionally: "Sure thing", "Got it", "Perfect", "Awesome".
+
+EXAMPLES OF GOOD RESPONSES:
+- "Oh that sounds great! And what time would work best for that?"
+- "Perfect, I'll let them know. Is there anything else I should be aware of?"
+- "Got it, thanks! One more quick question - do you have availability this weekend?"
+
+EXAMPLES OF BAD RESPONSES (too robotic/formal):
+- "I have noted your request. Is there anything else I can assist you with?"
+- "Thank you for providing that information. I will process it accordingly."
+"""
+
+
 def _chat_llm(user_text: str) -> str:
     if not OPENAI_API_KEY or not OpenAI:
         return f"You said: {user_text}"
@@ -1003,6 +1018,70 @@ def _chat_llm(user_text: str) -> str:
     except Exception as llm_err:
         app.logger.exception(f"OpenAI chat failed: {llm_err}")
         return "I'm having trouble processing that. Could you repeat?"
+
+
+def _phone_agent_chat(call: 'CallTask', speech_result: str) -> str:
+    """
+    Generate a conversational AI response for phone calls using GPT-4o
+    with full conversation history.
+    """
+    if not OPENAI_API_KEY or not OpenAI:
+        return "Sorry, I can't process that right now."
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        # Build system prompt with call context
+        system = PHONE_AGENT_SYSTEM_PROMPT
+        if call:
+            system += f"\nCALL CONTEXT:"
+            system += f"\n- Calling: {call.target_name or 'someone'}"
+            system += f"\n- Objective: {call.objective or 'general conversation'}"
+            if call.context:
+                try:
+                    ctx = json.loads(call.context)
+                    system += f"\n- Details: {json.dumps(ctx)}"
+                except Exception:
+                    pass
+            if call.call_script:
+                system += f"\n- Script guidance: {call.call_script}"
+
+        # Build conversation history from call events
+        messages = [{"role": "system", "content": system}]
+
+        if call:
+            events = CallEvent.query.filter_by(
+                call_task_id=call.id,
+                event_type="turn"
+            ).order_by(CallEvent.timestamp.asc()).all()
+
+            for event in events:
+                try:
+                    payload = json.loads(event.payload) if event.payload else {}
+                    speaker = payload.get("speaker", "")
+                    text = payload.get("text", "")
+                    if speaker == "human" and text:
+                        messages.append({"role": "user", "content": text})
+                    elif speaker == "ai" and text:
+                        messages.append({"role": "assistant", "content": text})
+                except Exception:
+                    continue
+
+        # Add current speech as the latest user message
+        messages.append({"role": "user", "content": speech_result})
+
+        completion = client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.8,
+            max_tokens=100
+        )
+
+        reply = (completion.choices[0].message.content or "").strip()
+        return reply if reply else "Hmm, could you say that again?"
+    except Exception as e:
+        app.logger.exception(f"Phone agent chat failed: {e}")
+        return "Sorry, I'm having a bit of trouble. Could you repeat that?"
 
 
 # -------- Chat (modern + legacy) --------
