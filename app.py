@@ -815,9 +815,26 @@ def twilio_voice_webhook():
 
         response.append(gather)
 
-        # If no input, say goodbye
-        goodbye_msg = "I didn't hear anything. Goodbye."
-        _add_speech_to_twiml(response, goodbye_msg, base_url)
+        # If no input, try again instead of hanging up
+        retry_gather = Gather(
+            input="speech",
+            action=f"{base_url}twilio/voice/respond",
+            speech_timeout="auto",
+            language="en-US"
+        )
+        retry_msg = "Hello? Are you still there?"
+        if ELEVENLABS_API_KEY:
+            cache_key = generate_and_cache_audio(retry_msg, use_elevenlabs=True)
+            if cache_key:
+                retry_gather.play(f"{base_url}audio/{cache_key}")
+            else:
+                retry_gather.say(retry_msg, voice="Polly.Matthew")
+        else:
+            retry_gather.say(retry_msg, voice="Polly.Matthew")
+        response.append(retry_gather)
+
+        # Only hang up if they still don't respond
+        _add_speech_to_twiml(response, "Okay, looks like you're busy. I'll try again later. Bye!", base_url)
         response.hangup()
 
         return Response(str(response), mimetype="application/xml")
@@ -900,7 +917,26 @@ def twilio_voice_respond():
 
             response.append(gather)
 
-            _add_speech_to_twiml(response, "I didn't hear a response. Goodbye.", base_url)
+            # If no input, ask if they're still there
+            retry_gather = Gather(
+                input="speech",
+                action=f"{base_url}twilio/voice/respond",
+                speech_timeout="auto",
+                language="en-US"
+            )
+            retry_msg = "Hey, are you still there?"
+            if ELEVENLABS_API_KEY:
+                cache_key = generate_and_cache_audio(retry_msg, use_elevenlabs=True)
+                if cache_key:
+                    retry_gather.play(f"{base_url}audio/{cache_key}")
+                else:
+                    retry_gather.say(retry_msg, voice="Polly.Matthew")
+            else:
+                retry_gather.say(retry_msg, voice="Polly.Matthew")
+            response.append(retry_gather)
+
+            # Only hang up after second silence
+            _add_speech_to_twiml(response, "No worries, I'll let you go. Talk soon!", base_url)
             response.hangup()
 
         return Response(str(response), mimetype="application/xml")
