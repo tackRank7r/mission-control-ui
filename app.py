@@ -17,7 +17,7 @@ import uuid
 import json
 import traceback
 import hashlib
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Tuple, Optional
 from functools import wraps
 
@@ -74,6 +74,14 @@ TWILIO_VOICE_URL = os.getenv("TWILIO_VOICE_URL", "")
 # ElevenLabs config
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default: Rachel
+ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID", "")
+ELEVENLABS_PHONE_NUMBER_ID = os.getenv("ELEVENLABS_PHONE_NUMBER_ID", "")
+
+# Hybrid routing cost limits
+COST_PER_MIN_ELEVENLABS_AGENT = 10   # $0.10/min in cents
+COST_PER_MIN_TWILIO_CUSTOM = 2       # $0.02/min in cents
+WEEKLY_COST_LIMIT_CENTS = 2000       # $20/week
+WEEKLY_CALLS_PER_USER = 4
 
 # n8n webhook URLs
 N8N_BASE_URL = os.getenv("N8N_BASE_URL", "https://fdaf.app.n8n.cloud")
@@ -101,6 +109,7 @@ class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(120), nullable=False)
     email = db.Column(db.String(255), unique=True, nullable=True)
+    is_admin = db.Column(db.Boolean, default=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -157,6 +166,9 @@ class CallTask(db.Model):
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     started_at = db.Column(db.DateTime, nullable=True)
     completed_at = db.Column(db.DateTime, nullable=True)
+
+    # Routing
+    routing_type = db.Column(db.String(32), nullable=True)  # "elevenlabs_agent" or "twilio_custom"
 
     # Cost tracking
     duration_seconds = db.Column(db.Integer, nullable=True)
@@ -249,6 +261,75 @@ def log_n8n_error(workflow: str, message: str, node: str = None, execution_id: s
     db.session.add(log)
     db.session.commit()
     return log
+
+
+# -------- Hybrid Routing Helpers --------
+
+def _get_week_start() -> datetime:
+    """Return Monday 00:00 UTC of the current week."""
+    now = datetime.utcnow()
+    monday = now - timedelta(days=now.weekday())
+    return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _weekly_total_cost_cents() -> int:
+    """Sum cost_cents for all calls created this week."""
+    week_start = _get_week_start()
+    from sqlalchemy import func
+    result = db.session.query(func.coalesce(func.sum(CallTask.cost_cents), 0)).filter(
+        CallTask.created_at >= week_start,
+        CallTask.cost_cents.isnot(None)
+    ).scalar()
+    return int(result)
+
+
+def _weekly_user_call_count(user_id: int) -> int:
+    """Count calls for a user this week."""
+    week_start = _get_week_start()
+    return CallTask.query.filter(
+        CallTask.user_id == user_id,
+        CallTask.created_at >= week_start
+    ).count()
+
+
+def _should_use_elevenlabs_agent(user_id: int) -> bool:
+    """Decide whether to route via ElevenLabs Agents (True) or Twilio custom (False)."""
+    if not ELEVENLABS_AGENT_ID or not ELEVENLABS_PHONE_NUMBER_ID:
+        return False
+
+    user = User.query.get(user_id)
+    if user and user.is_admin:
+        return True
+
+    if _weekly_total_cost_cents() >= WEEKLY_COST_LIMIT_CENTS:
+        return False
+    if _weekly_user_call_count(user_id) >= WEEKLY_CALLS_PER_USER:
+        return False
+
+    return True
+
+
+def _initiate_elevenlabs_agent_call(call: 'CallTask') -> dict:
+    """Initiate outbound call via ElevenLabs Conversational AI Agents API."""
+    url = "https://api.elevenlabs.io/v1/convai/twilio/outbound-call"
+    headers = {"xi-api-key": ELEVENLABS_API_KEY, "Content-Type": "application/json"}
+    payload = {
+        "agent_id": ELEVENLABS_AGENT_ID,
+        "agent_phone_number_id": ELEVENLABS_PHONE_NUMBER_ID,
+        "to_number": call.target_phone,
+        "conversation_initiation_client_data": {
+            "dynamic_variables": {
+                "target_name": call.target_name or "",
+                "objective": call.objective or "",
+                "context": call.context or "",
+                "call_script": call.call_script or ""
+            }
+        }
+    }
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(url, json=payload, headers=headers)
+        resp.raise_for_status()
+        return resp.json()
 
 
 # -------- Health / Diagnostics --------
@@ -467,7 +548,8 @@ def n8n_call_complete(call_id):
 
         # Estimate cost (Twilio ~$0.02/min)
         if call.duration_seconds:
-            call.cost_cents = max(1, int(call.duration_seconds / 60 * 2))
+            rate = COST_PER_MIN_ELEVENLABS_AGENT if call.routing_type == "elevenlabs_agent" else COST_PER_MIN_TWILIO_CUSTOM
+            call.cost_cents = max(1, int(call.duration_seconds / 60 * rate))
 
         db.session.commit()
 
@@ -631,6 +713,8 @@ def schedule_call():
         else:
             scheduled_at = datetime.utcnow()  # Immediate
 
+        use_agent = _should_use_elevenlabs_agent(request.user.id)
+
         call = CallTask(
             user_id=request.user.id,
             status="scheduled",
@@ -639,20 +723,45 @@ def schedule_call():
             objective=data.get("objective"),
             context=json.dumps(data.get("context")) if data.get("context") else None,
             call_script=data.get("call_script"),
-            scheduled_at=scheduled_at
+            scheduled_at=scheduled_at,
+            routing_type="elevenlabs_agent" if use_agent else "twilio_custom"
         )
         db.session.add(call)
         db.session.commit()
 
         log_call_event(call.id, "created", {
             "target_phone": call.target_phone,
-            "scheduled_at": scheduled_at.isoformat()
+            "scheduled_at": scheduled_at.isoformat(),
+            "routing_type": call.routing_type
         })
+
+        # Route via ElevenLabs Agents API (bypasses n8n/Twilio)
+        if use_agent:
+            try:
+                result = _initiate_elevenlabs_agent_call(call)
+                call.status = "in_progress"
+                call.started_at = datetime.utcnow()
+                call.twilio_call_sid = result.get("callSid")
+                db.session.commit()
+                log_call_event(call.id, "started", {
+                    "routing_type": "elevenlabs_agent",
+                    "conversation_id": result.get("conversation_id"),
+                    "twilio_call_sid": result.get("callSid")
+                })
+            except Exception as agent_err:
+                app.logger.warning(f"ElevenLabs Agent call failed, falling back to Twilio: {agent_err}")
+                call.routing_type = "twilio_custom"
+                db.session.commit()
+                log_call_event(call.id, "agent_fallback", {
+                    "error": str(agent_err)
+                })
+        # else: stays "scheduled" for n8n to pick up via /n8n/pending-calls
 
         return jsonify({
             "ok": True,
             "call_id": call.id,
             "status": call.status,
+            "routing_type": call.routing_type,
             "scheduled_at": call.scheduled_at.isoformat()
         }), 201
     except Exception as e:
@@ -729,6 +838,40 @@ def list_calls():
             "result_status": c.result_status,
             "result_summary": c.result_summary
         } for c in calls]
+    })
+
+
+@app.get("/usage")
+@require_bearer
+@require_user
+def usage_stats():
+    """Get current week's usage stats for debugging."""
+    week_start = _get_week_start()
+    total_cost = _weekly_total_cost_cents()
+    user_calls = _weekly_user_call_count(request.user.id)
+    is_admin = request.user.is_admin
+
+    # Determine current routing for this user
+    if is_admin:
+        current_routing = "elevenlabs_agent (admin bypass)"
+    elif total_cost >= WEEKLY_COST_LIMIT_CENTS:
+        current_routing = "twilio_custom (weekly cost limit reached)"
+    elif user_calls >= WEEKLY_CALLS_PER_USER:
+        current_routing = "twilio_custom (user call limit reached)"
+    elif not ELEVENLABS_AGENT_ID:
+        current_routing = "twilio_custom (agent not configured)"
+    else:
+        current_routing = "elevenlabs_agent"
+
+    return jsonify({
+        "week_start": week_start.isoformat(),
+        "weekly_cost_cents": total_cost,
+        "weekly_cost_limit_cents": WEEKLY_COST_LIMIT_CENTS,
+        "user_calls_this_week": user_calls,
+        "user_calls_limit": WEEKLY_CALLS_PER_USER,
+        "is_admin": is_admin,
+        "current_routing": current_routing,
+        "agent_configured": bool(ELEVENLABS_AGENT_ID and ELEVENLABS_PHONE_NUMBER_ID)
     })
 
 
@@ -974,7 +1117,8 @@ def twilio_status_webhook():
                     call.completed_at = datetime.utcnow()
                     call.duration_seconds = int(duration) if duration else None
                     if call.duration_seconds:
-                        call.cost_cents = max(1, int(call.duration_seconds / 60 * 2))
+                        rate = COST_PER_MIN_ELEVENLABS_AGENT if call.routing_type == "elevenlabs_agent" else COST_PER_MIN_TWILIO_CUSTOM
+                        call.cost_cents = max(1, int(call.duration_seconds / 60 * rate))
                     db.session.commit()
             elif call_status in ["busy", "no-answer", "failed", "canceled"]:
                 call.status = "failed"

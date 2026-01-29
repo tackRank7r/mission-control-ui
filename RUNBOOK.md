@@ -5,32 +5,71 @@
 SideKick360 (Jarvis) is an AI-powered personal assistant with:
 - iOS native app for chat and voice interaction
 - Flask backend hosted on Render
-- n8n workflow automation for agentic phone calls
-- Twilio integration for outbound calling
+- **Hybrid call routing**: ElevenLabs Conversational AI Agents (preferred) with Twilio/n8n fallback
+- Usage-based routing with weekly cost and call limits
 - ElevenLabs TTS for natural voice synthesis
 
 ---
 
 ## Architecture
 
+### Hybrid Call Routing (Active)
+
+```
+                         POST /call/schedule
+                                │
+                    ┌───────────┴───────────┐
+                    │  Routing Decision      │
+                    │  _should_use_agent()   │
+                    └───────────┬───────────┘
+                          ┌─────┴─────┐
+                          │           │
+                    ┌─────▼─────┐ ┌───▼────────────┐
+                    │ PREMIUM   │ │ BUDGET          │
+                    │ ElevenLabs│ │ Twilio Custom   │
+                    │ Agents API│ │ (n8n + TwiML)   │
+                    └─────┬─────┘ └───┬────────────┘
+                          │           │
+                    ElevenLabs    n8n polls
+                    handles      /n8n/pending-calls
+                    everything   → Twilio → TwiML
+                                 → GPT-4o-mini
+                                 → ElevenLabs TTS
+```
+
+### Routing Rules
+
+| Condition | Route |
+|-----------|-------|
+| Admin user | Always ElevenLabs Agents |
+| Weekly cost < $20 AND user calls < 4/week | ElevenLabs Agents |
+| Weekly cost >= $20 | Twilio custom (all users) |
+| User calls >= 4/week | Twilio custom (that user) |
+| ElevenLabs Agent API fails | Auto-fallback to Twilio custom |
+| `ELEVENLABS_AGENT_ID` not set | Twilio custom (all calls) |
+
+### Full System Architecture
+
 ```
 ┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
 │   iOS App       │────▶│  Flask Backend   │────▶│    OpenAI       │
-│  (SwiftUI)      │     │   (Render)       │     │   GPT-4         │
+│  (SwiftUI)      │     │   (Render)       │     │   GPT-4o-mini   │
 └─────────────────┘     └──────────────────┘     └─────────────────┘
                                │
-                               ▼
-                        ┌──────────────────┐
-                        │      n8n         │
-                        │  (Workflows)     │
-                        └──────────────────┘
-                               │
-              ┌────────────────┼────────────────┐
-              ▼                ▼                ▼
-       ┌──────────┐     ┌──────────┐     ┌──────────┐
-       │  Twilio  │     │ElevenLabs│     │  Polly   │
-       │  Voice   │     │   TTS    │     │   TTS    │
-       └──────────┘     └──────────┘     └──────────┘
+                 ┌─────────────┼─────────────┐
+                 ▼                           ▼
+          ┌──────────────┐            ┌──────────────┐
+          │  ElevenLabs  │            │     n8n      │
+          │  Agents API  │            │  (Workflows) │
+          │  (preferred) │            │  (fallback)  │
+          └──────────────┘            └──────────────┘
+                                           │
+                            ┌──────────────┼──────────────┐
+                            ▼              ▼              ▼
+                     ┌──────────┐   ┌──────────┐   ┌──────────┐
+                     │  Twilio  │   │ElevenLabs│   │  Polly   │
+                     │  Voice   │   │   TTS    │   │   TTS    │
+                     └──────────┘   └──────────┘   └──────────┘
 ```
 
 ---
@@ -43,6 +82,7 @@ CGPTPROJECT/
 ├── requirements.txt          # Python dependencies
 ├── render.yaml               # Render deployment config
 ├── Procfile                  # Gunicorn start command
+├── RUNBOOK.md                # This file
 ├── n8n-workflows/            # n8n workflow JSON files
 │   ├── call-scheduler.json
 │   ├── twilio-voice-handler.json
@@ -68,7 +108,7 @@ CGPTPROJECT/
 ## Backend Endpoints (app.py)
 
 ### Authentication
-All endpoints require `Authorization: Bearer <APP_BACKEND_BEARER>` header.
+All endpoints require `Authorization: Bearer <APP_BACKEND_BEARER>` header (except `/health`, `/n8n/*`, `/twilio/*`).
 
 ### Core Endpoints
 
@@ -80,13 +120,18 @@ All endpoints require `Authorization: Bearer <APP_BACKEND_BEARER>` header.
 | `/api/chat` | POST | Legacy chat endpoint |
 | `/speak` | POST | TTS endpoint (returns audio/mpeg) |
 | `/history` | GET | Get chat session history |
+| `/usage` | GET | **Weekly usage stats and routing status** |
 
 ### Call Management
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/call/schedule` | POST | Schedule a new outbound call |
-| `/n8n/pending-calls` | GET | Get calls ready to execute |
+| `/call/schedule` | POST | Schedule a new outbound call **(routes via hybrid logic)** |
+| `/call/<id>` | GET | Get call details and status |
+| `/call/<id>/cancel` | POST | Cancel a scheduled call |
+| `/call/<id>/events` | GET | Get audit trail for a call |
+| `/calls` | GET | List user's calls |
+| `/n8n/pending-calls` | GET | Get calls ready for n8n (Twilio custom only) |
 | `/n8n/call/<id>/start` | POST | Mark call as started |
 | `/n8n/call/<id>/turn` | POST | Log conversation turn |
 | `/n8n/call/<id>/complete` | POST | Mark call completed |
@@ -114,21 +159,26 @@ OPENAI_API_KEY=sk-...
 DATABASE_URL=postgresql://...  # Auto-set by Render
 ```
 
-### Twilio (for phone calls)
+### ElevenLabs Conversational AI Agents (hybrid routing)
+
+```bash
+ELEVENLABS_API_KEY=sk_...
+ELEVENLABS_VOICE_ID=lAxf5ma5HGtzxC434SWT   # Tori
+ELEVENLABS_AGENT_ID=your_agent_id           # From ElevenLabs dashboard
+ELEVENLABS_PHONE_NUMBER_ID=your_phone_id    # From ElevenLabs dashboard
+```
+
+### Twilio (for fallback phone calls)
 
 ```bash
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
-TWILIO_FROM_NUMBER=+1234567890
+TWILIO_FROM_NUMBER=+12568604020
 ```
 
-### TTS Options
+### TTS Fallbacks
 
 ```bash
-# ElevenLabs (recommended - most natural)
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM  # Rachel (default)
-
 # AWS Polly (fallback)
 AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
@@ -138,12 +188,113 @@ POLLY_VOICE=Matthew
 
 ---
 
+## Hybrid Routing System
+
+### How It Works
+
+When `/call/schedule` is called:
+
+1. `_should_use_elevenlabs_agent(user_id)` checks:
+   - Is `ELEVENLABS_AGENT_ID` configured? If not → Twilio custom
+   - Is the user an admin (`is_admin=True`)? If yes → always ElevenLabs Agents
+   - Is weekly total cost < $20 (2000 cents)? If no → Twilio custom
+   - Has the user made < 4 calls this week? If no → Twilio custom
+   - Otherwise → ElevenLabs Agents
+
+2. **ElevenLabs Agents route:**
+   - Calls `POST https://api.elevenlabs.io/v1/convai/twilio/outbound-call`
+   - ElevenLabs handles the entire conversation (AI, voice, phone)
+   - Call status set to `"in_progress"` immediately
+   - If the API call fails → auto-fallback to Twilio custom
+
+3. **Twilio custom route:**
+   - Call status stays `"scheduled"`
+   - n8n polls `/n8n/pending-calls` every 30 seconds
+   - n8n initiates Twilio call → TwiML → GPT-4o-mini + ElevenLabs TTS
+
+### Cost Tracking
+
+| Route | Cost per minute |
+|-------|----------------|
+| ElevenLabs Agents | $0.10/min (10 cents) |
+| Twilio custom | $0.02/min (2 cents) |
+
+Costs are calculated when calls complete and stored in `CallTask.cost_cents`.
+
+### Limits (configurable in app.py)
+
+```python
+WEEKLY_COST_LIMIT_CENTS = 2000   # $20/week
+WEEKLY_CALLS_PER_USER = 4        # 4 calls/week per user
+```
+
+Week resets every Monday 00:00 UTC.
+
+### Database Fields
+
+**User model:**
+- `is_admin` (Boolean) — admin users bypass all limits
+
+**CallTask model:**
+- `routing_type` — `"elevenlabs_agent"` or `"twilio_custom"`
+- `cost_cents` — calculated based on routing_type rate
+
+---
+
+## Phone Call Flows
+
+### Flow A: ElevenLabs Agents (preferred)
+
+```
+1. iOS App/API → POST /call/schedule
+                    ↓
+2. _should_use_elevenlabs_agent() → True
+                    ↓
+3. POST to ElevenLabs Agents API (outbound-call)
+                    ↓
+4. ElevenLabs handles entire call
+   (AI conversation, voice synthesis, phone connection)
+                    ↓
+5. Call completed → cost tracked at $0.10/min
+```
+
+### Flow B: Twilio Custom (fallback)
+
+```
+1. iOS App/API → POST /call/schedule
+                    ↓
+2. _should_use_elevenlabs_agent() → False (over limits)
+                    ↓
+3. CallTask created (status: "scheduled", routing_type: "twilio_custom")
+                    ↓
+4. n8n polls /n8n/pending-calls every 30s
+                    ↓
+5. n8n initiates Twilio call with TwiML redirect
+                    ↓
+6. Twilio calls target phone
+                    ↓
+7. On answer → Twilio requests /twilio/voice
+                    ↓
+8. Backend returns TwiML with greeting (ElevenLabs TTS audio)
+                    ↓
+9. Speech recognition captures response
+                    ↓
+10. /twilio/voice/respond → GPT-4o-mini → ElevenLabs TTS
+                    ↓
+11. Loop until conversation ends
+                    ↓
+12. Call marked complete → cost tracked at $0.02/min
+```
+
+---
+
 ## n8n Workflows
 
-### Call Scheduler (Primary)
+### Call Scheduler (Primary — Twilio custom calls only)
 - **Trigger:** Every 30 seconds
 - **Flow:** Poll `/n8n/pending-calls` → Split items → Mark started → Initiate Twilio call → Update call SID
 - **n8n URL:** https://fdaf.app.n8n.cloud
+- **Note:** Only picks up calls with `routing_type: "twilio_custom"` (those not routed to ElevenLabs Agents)
 
 ### Configuration Required in n8n
 
@@ -157,37 +308,9 @@ POLLY_VOICE=Matthew
 
 ---
 
-## Phone Call Flow
+## TTS Priority Chain (for Twilio custom calls)
 
-```
-1. iOS App/API → POST /call/schedule
-                    ↓
-2. CallTask created (status: "scheduled")
-                    ↓
-3. n8n polls /n8n/pending-calls every 30s
-                    ↓
-4. n8n initiates Twilio call with TwiML redirect
-                    ↓
-5. Twilio calls target phone
-                    ↓
-6. On answer → Twilio requests /twilio/voice
-                    ↓
-7. Backend returns TwiML with greeting (ElevenLabs audio)
-                    ↓
-8. Speech recognition captures response
-                    ↓
-9. /twilio/voice/respond generates AI response
-                    ↓
-10. Loop until conversation ends
-                    ↓
-11. Call marked complete, summary generated
-```
-
----
-
-## TTS Priority Chain
-
-1. **ElevenLabs** (if `ELEVENLABS_API_KEY` set) - Most natural
+1. **ElevenLabs** (if `ELEVENLABS_API_KEY` set) - Most natural, uses Tori voice
 2. **AWS Polly** (if AWS credentials set) - Good quality
 3. **OpenAI TTS** (if `OPENAI_API_KEY` set) - Fallback
 
@@ -210,66 +333,22 @@ git add . && git commit -m "message" && git push origin main
 ## Monitoring
 
 - **UptimeRobot:** Pings `/health` every 5 minutes
+- **Usage endpoint:** `GET /usage` shows weekly cost, call counts, and current routing mode
 - **Twilio Debugger:** Monitor → Logs → Errors
 - **n8n Executions:** Check workflow run history
 - **Render Logs:** Dashboard → Logs
 
 ---
 
-## ElevenLabs Agents: Alternative Architecture
+## Setting Up ElevenLabs Agents (Prerequisites)
 
-### Current Approach: Custom Stack
-```
-iOS App → Flask Backend → n8n → Twilio → Custom TwiML → ElevenLabs TTS
-```
-
-### Alternative: ElevenLabs Agents Platform
-```
-iOS App → Flask Backend → ElevenLabs Conversational AI (handles everything)
-```
-
----
-
-## Comparison: Current Stack vs ElevenLabs Agents
-
-### Option A: Current Custom Stack (n8n + Twilio + ElevenLabs TTS)
-
-| Pros | Cons |
-|------|------|
-| **Full control** - Complete customization of conversation flow, prompts, and logic | **Complex setup** - Multiple services to configure and maintain |
-| **Flexible integration** - Can integrate with any service via n8n workflows | **Latency** - Multiple hops (n8n → Twilio → Backend → TTS) add delay |
-| **Cost transparency** - Pay separately for each service, optimize individually | **Debugging difficulty** - Issues can occur at any point in the chain |
-
-**Best for:** Complex workflows, custom business logic, integration with many external services
-
----
-
-### Option B: ElevenLabs Conversational AI Agents
-
-| Pros | Cons |
-|------|------|
-| **Seamless voice** - Ultra-low latency, natural conversation flow | **Less control** - Limited customization of conversation logic |
-| **Simpler architecture** - One platform handles voice, AI, and phone | **Vendor lock-in** - Dependent on ElevenLabs platform |
-| **Built-in phone numbers** - No separate Twilio setup needed | **Cost** - May be more expensive at scale than DIY approach |
-
-**Best for:** Simple call flows, rapid prototyping, voice-first experiences
-
----
-
-### Hybrid Approach (Recommended)
-
-Use **both** based on call type:
-
-| Call Type | Recommended Stack |
-|-----------|-------------------|
-| Simple info calls (appointments, reservations) | ElevenLabs Agents |
-| Complex multi-step workflows | Current n8n + Twilio stack |
-| Calls requiring external API integration | Current n8n + Twilio stack |
-
-**Implementation:**
-1. Add `call_type` field to CallTask model
-2. Route simple calls to ElevenLabs Agents API
-3. Route complex calls through n8n/Twilio
+1. Go to [ElevenLabs dashboard](https://elevenlabs.io) → Conversational AI → Create Agent
+2. Configure the agent with Tori's voice and personality
+3. Connect your Twilio phone number (+12568604020) under the agent's phone settings
+4. Copy the **Agent ID** and **Phone Number ID**
+5. Set env vars on Render:
+   - `ELEVENLABS_AGENT_ID` = your agent ID
+   - `ELEVENLABS_PHONE_NUMBER_ID` = your phone number ID
 
 ---
 
@@ -288,8 +367,20 @@ Use **both** based on call type:
 - **Fix:** Check phone format (+1XXXXXXXXXX), verify all fields populated
 
 ### Calls not being picked up by n8n
-- **Cause:** Workflow not active
-- **Fix:** Toggle workflow "Active" in n8n
+- **Cause:** Workflow not active, or calls routed to ElevenLabs Agents
+- **Fix:** Toggle workflow "Active" in n8n; check `/usage` endpoint to see routing mode
+
+### ElevenLabs Agent call fails with 401
+- **Cause:** Invalid or expired API key
+- **Fix:** Regenerate key at elevenlabs.io, update `ELEVENLABS_API_KEY` in Render
+
+### All calls routing to Twilio custom
+- **Cause:** `ELEVENLABS_AGENT_ID` or `ELEVENLABS_PHONE_NUMBER_ID` not set
+- **Fix:** Set both env vars on Render (see Setup section)
+
+### Calls routing to Twilio unexpectedly
+- **Cause:** Weekly cost limit ($20) or per-user call limit (4/week) reached
+- **Fix:** Check `GET /usage` endpoint; admin users bypass limits
 
 ---
 
@@ -302,8 +393,15 @@ curl -X POST "https://cgptproject-v2.onrender.com/call/schedule" \
   -H "Content-Type: application/json" \
   -d '{"target_phone":"+1XXXXXXXXXX","target_name":"Test","objective":"test"}'
 ```
+Response includes `routing_type` showing which stack handled the call.
 
-### Check Pending Calls
+### Check Usage / Routing Status
+```bash
+curl "https://cgptproject-v2.onrender.com/usage" \
+  -H "Authorization: Bearer YOUR_TOKEN"
+```
+
+### Check Pending Calls (Twilio custom only)
 ```bash
 curl https://cgptproject-v2.onrender.com/n8n/pending-calls
 ```
@@ -338,6 +436,8 @@ curl https://cgptproject-v2.onrender.com/health
 
 | Date | Change |
 |------|--------|
+| 2026-01-28 | **Hybrid routing**: ElevenLabs Agents preferred, Twilio fallback with $20/week and 4 calls/week limits |
+| 2026-01-28 | Added `is_admin` to User, `routing_type` to CallTask, `/usage` endpoint |
 | 2026-01-27 | Added ElevenLabs TTS integration |
 | 2026-01-27 | Fixed Twilio TwiML configuration |
 | 2026-01-26 | Deployed n8n workflow integration |
@@ -345,4 +445,4 @@ curl https://cgptproject-v2.onrender.com/health
 
 ---
 
-*Last updated: January 27, 2026*
+*Last updated: January 28, 2026*
