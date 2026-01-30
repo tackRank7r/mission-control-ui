@@ -71,7 +71,7 @@ final class VoiceChatManager: ObservableObject {
     // MARK: Listening
 
     func startListening() async {
-        if state == .idle { state = .listening }
+        state = .listening  // Always set to listening when we start
         do {
             try configureSession()
             try startRecognition()
@@ -135,6 +135,12 @@ final class VoiceChatManager: ObservableObject {
                 }
             }
             if let err {
+                // Ignore cancellation errors - these are expected when we stop listening
+                let nsError = err as NSError
+                if nsError.domain == "kAFAssistantErrorDomain" && nsError.code == 216 {
+                    // Error 216 = request was canceled, this is normal
+                    return
+                }
                 self.lastError = err.localizedDescription
                 self.finishTurn(finalText: self.partialTranscript)
             }

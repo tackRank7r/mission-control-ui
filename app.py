@@ -1179,8 +1179,15 @@ def _chat_llm(user_text: str) -> str:
         client = OpenAI(api_key=OPENAI_API_KEY)
 
         system_prompt = (
-            "You are Jarvis, a helpful assistant. Be friendly and concise. "
-            "If on a phone call, speak naturally as if in a real conversation."
+            "You are Jarvis, a helpful and friendly AI assistant. "
+            "Format your responses for easy reading:\n"
+            "- Use emojis naturally to make responses more engaging and friendly 😊\n"
+            "- Use bullet points (•) for lists and steps\n"
+            "- Use line breaks to separate ideas\n"
+            "- Keep responses concise but well-formatted\n"
+            "- For recipes, instructions, or multi-step tasks, use numbered lists or bullet points\n"
+            "- Add relevant emojis for context (🍕 for food, 📅 for calendar, ✅ for completed tasks, etc.)\n\n"
+            "Be warm, conversational, and helpful. Make your responses visually scannable and easy to read."
         )
 
         completion = client.chat.completions.create(
@@ -1190,7 +1197,7 @@ def _chat_llm(user_text: str) -> str:
                 {"role": "user", "content": user_text},
             ],
             temperature=0.7,
-            max_tokens=150
+            max_tokens=300
         )
 
         reply = (completion.choices[0].message.content or "").strip()
@@ -1483,15 +1490,24 @@ def speak():
             return jsonify(error="missing_text"), 400
 
         audio_bytes = None
+        # Try ElevenLabs first for best quality
         try:
-            audio_bytes = _polly_tts(text)
+            if ELEVENLABS_API_KEY:
+                audio_bytes = _elevenlabs_tts(text)
+                app.logger.info("Using ElevenLabs TTS for /speak")
+            else:
+                raise RuntimeError("elevenlabs_not_configured")
         except Exception as e:
-            app.logger.warning(f"Polly unavailable: {e}")
+            app.logger.warning(f"ElevenLabs unavailable: {e}, trying Polly")
             try:
-                audio_bytes = _openai_tts(text)
+                audio_bytes = _polly_tts(text)
             except Exception as e2:
-                app.logger.exception("TTS failed")
-                return jsonify(error="tts_failed", detail=str(e2)), 500
+                app.logger.warning(f"Polly unavailable: {e2}, trying OpenAI")
+                try:
+                    audio_bytes = _openai_tts(text)
+                except Exception as e3:
+                    app.logger.exception("All TTS services failed")
+                    return jsonify(error="tts_failed", detail=str(e3)), 500
 
         return Response(audio_bytes, status=200, mimetype="audio/mpeg", headers={"Cache-Control": "no-store"})
     except Exception as e:
