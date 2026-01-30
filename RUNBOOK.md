@@ -432,6 +432,32 @@ curl https://cgptproject-v2.onrender.com/health
 
 ---
 
+## 🚨 iOS Launch Screen - CRITICAL REQUIREMENT
+
+**Problem:** App displays with black bars (letterboxing) on iPhone, limiting the screen to old 3.5" or 4" device sizes.
+
+**Root Cause:** iOS requires a launch screen storyboard for apps to support modern screen sizes. Without it, the app defaults to legacy device dimensions.
+
+**Solution:**
+1. Ensure `launchScreen.storyboard` exists in the project
+2. Verify Xcode project configuration has:
+   ```
+   INFOPLIST_KEY_UILaunchStoryboardName = launchScreen;
+   ```
+   **NOT** `AppIcon` or any other value
+
+**Fix Location:** `ios/JarvisClient/SideKick360.xcodeproj/project.pbxproj`
+
+**Why This Matters:**
+- Launch screen storyboard tells iOS the app can handle all screen sizes
+- Without it, iOS assumes the app only supports old device sizes and letterboxes the content
+- This is true for both UIKit and SwiftUI apps
+- The launch screen should replicate a simplified version of the app's initial screen for faster perceived launch times
+
+**Reference:** [Stack Overflow: iOS app with black bars](https://stackoverflow.com/questions/tagged/ios+launch-screen)
+
+---
+
 ## Version History
 
 | Date | Change |
