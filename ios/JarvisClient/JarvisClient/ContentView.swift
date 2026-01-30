@@ -7,6 +7,7 @@ import SwiftUI
 
 struct ContentView: View {
     @StateObject private var vm = ChatViewModel()
+    @StateObject private var voiceManager = VoiceChatManager()
 
     @State private var inputText: String = ""
     @State private var showMenu = false
@@ -34,6 +35,11 @@ struct ContentView: View {
                     Divider().opacity(0.0)
                     chatList
                     inputBar
+                }
+            }
+            .onAppear {
+                voiceManager.onMessageReceived = { text, isUser in
+                    vm.addVoiceMessage(text: text, isUser: isUser)
                 }
             }
             .sheet(isPresented: $showMenu) {
@@ -66,9 +72,17 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                // Agent name ~80% of the old huge title.
-                Text(vm.agentName)
-                    .font(.system(size: 22, weight: .semibold))
+                HStack(spacing: 6) {
+                    Text(vm.agentName)
+                        .font(.system(size: 22, weight: .semibold))
+                    Text("v1.30.1")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.secondary.opacity(0.1))
+                        .cornerRadius(4)
+                }
                 Text("Your project & calls copilot")
                     .font(.subheadline)
                     .foregroundColor(.secondary)
@@ -134,22 +148,35 @@ struct ContentView: View {
                         .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
                 )
 
-            Button {
-                handleSend()
-            } label: {
-                Text("Send")
-                    .fontWeight(.semibold)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(
-                        RoundedRectangle(cornerRadius: 14, style: .continuous)
-                            .fill(isTyping && !vm.isSending
-                                  ? Color.accentColor
-                                  : Color.gray.opacity(0.3))
-                    )
-                    .foregroundColor(.white)
+            if isTyping {
+                Button {
+                    handleSend()
+                } label: {
+                    Text("Send")
+                        .fontWeight(.semibold)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .fill(!vm.isSending ? Color.accentColor : Color.gray.opacity(0.3))
+                        )
+                        .foregroundColor(.white)
+                }
+                .disabled(vm.isSending)
+            } else {
+                Button {
+                    voiceManager.toggleVoiceConversation()
+                } label: {
+                    Image(systemName: voiceManager.state == .idle ? "mic.fill" : "stop.circle.fill")
+                        .font(.system(size: 20))
+                        .foregroundColor(voiceManager.state == .idle ? .accentColor : .red)
+                        .frame(width: 44, height: 44)
+                        .background(
+                            Circle()
+                                .fill(Color.secondary.opacity(0.1))
+                        )
+                }
             }
-            .disabled(!isTyping || vm.isSending)
         }
         .padding(.horizontal)
         .padding(.vertical, 8)

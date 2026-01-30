@@ -73,6 +73,12 @@ final class ChatViewModel: ObservableObject {
 
     // MARK: - Sending
 
+    /// Add a message from voice conversation (bypasses backend, messages come from VoiceChatManager)
+    func addVoiceMessage(text: String, isUser: Bool) {
+        let message = ChatMessage(role: isUser ? .me : .bot, text: text)
+        messages.append(message)
+    }
+
     func send(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
