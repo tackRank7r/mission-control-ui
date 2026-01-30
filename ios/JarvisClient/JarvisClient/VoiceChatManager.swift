@@ -21,6 +21,9 @@ final class VoiceChatManager: ObservableObject {
     /// UI level 0...1 computed from mic buffers (animate vortex)
     @Published var audioLevel: CGFloat = 0.0
 
+    /// Callback to add messages to chat when in conversation mode
+    var onMessageReceived: ((String, Bool) -> Void)? // (text, isUser)
+
     private let api = APIClient()
     private let playback = AudioPlayback.shared
     private let localTTS = LocalTTS.shared
@@ -33,7 +36,7 @@ final class VoiceChatManager: ObservableObject {
 
     // Turn-end detection
     private var lastSpeechAt: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
-    private let silenceMs: Double = 600
+    private let silenceMs: Double = 2000  // 2 seconds - allows natural pauses mid-sentence
     private var monitorTimer: Timer?
 
     // MARK: Public control
@@ -55,6 +58,11 @@ final class VoiceChatManager: ObservableObject {
         case .idle: Task { await requestAndStart() }
         case .listening, .thinking, .speaking: stopAll()
         }
+    }
+
+    /// Alias for toggle() - used for voice conversation mode
+    func toggleVoiceConversation() {
+        toggle()
     }
 
     func stopAll() {
@@ -220,10 +228,16 @@ final class VoiceChatManager: ObservableObject {
     }
 
     private func askAndSpeak(_ text: String) async {
+        // Add user message to chat
+        onMessageReceived?(text, true)
+
         do {
             var history: [Message] = [Message(role: .user, content: text)]
             let res = try await api.ask(messages: history)
             history.append(Message(role: .assistant, content: res.reply))
+
+            // Add assistant response to chat
+            onMessageReceived?(res.reply, false)
 
             // Try backend TTS first
             do {
