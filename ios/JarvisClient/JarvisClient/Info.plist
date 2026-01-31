@@ -20,13 +20,10 @@
 	<string>1</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>UILaunchStoryboardName</key>
+	<string>LaunchScreen</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>SideKick360 uses the microphone for voice chat.
-SideKick360 uses the microphone for voice chat.
-SideKick360 uses the microphone for voice chat.
-SideKick360 uses the microphone for voice chat.
-SideKick360 uses the microphone for voice chat.
-sidekick360 uses microphone access for voice chat and dictation</string>
+	<string>SideKick360 uses the microphone for voice chat and dictation.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>sidekick360 uses speech recognition to understand your voice</string>
 	<key>UIApplicationSceneManifest</key>

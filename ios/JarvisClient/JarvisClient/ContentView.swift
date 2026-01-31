@@ -73,7 +73,7 @@ struct ContentView: View {
                 HStack(spacing: 6) {
                     Text(vm.agentName)
                         .font(.system(size: 22, weight: .semibold))
-                    Text("v1.30.1")
+                    Text("v1.30.2 h:\(Int(UIScreen.main.bounds.height))")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6)
