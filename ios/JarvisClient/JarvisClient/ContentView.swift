@@ -37,10 +37,8 @@ struct ContentView: View {
                     inputBar
                 }
             }
-            .onAppear {
-                voiceManager.onMessageReceived = { text, isUser in
-                    vm.addVoiceMessage(text: text, isUser: isUser)
-                }
+            .onReceive(voiceManager.messagePublisher) { (text, isUser) in
+                vm.addVoiceMessage(text: text, isUser: isUser)
             }
             .sheet(isPresented: $showMenu) {
                 MainMenuView(
@@ -167,14 +165,23 @@ struct ContentView: View {
                 Button {
                     voiceManager.toggleVoiceConversation()
                 } label: {
-                    Image(systemName: voiceManager.state == .idle ? "mic.fill" : "stop.circle.fill")
-                        .font(.system(size: 20))
-                        .foregroundColor(voiceManager.state == .idle ? .accentColor : .red)
-                        .frame(width: 44, height: 44)
-                        .background(
+                    ZStack {
+                        // Pulsing background when listening
+                        if voiceManager.state == .listening {
                             Circle()
-                                .fill(Color.secondary.opacity(0.1))
-                        )
+                                .fill(Color.red.opacity(0.3))
+                                .scaleEffect(voiceManager.audioLevel > 0.1 ? 1.2 : 1.0)
+                                .animation(.easeInOut(duration: 0.3).repeatForever(autoreverses: true), value: voiceManager.audioLevel)
+                        }
+
+                        Circle()
+                            .fill(Color.secondary.opacity(0.1))
+
+                        Image(systemName: voiceManager.state == .idle ? "mic.fill" : "stop.circle.fill")
+                            .font(.system(size: 20))
+                            .foregroundColor(voiceManager.state == .idle ? .blue : .red)
+                    }
+                    .frame(width: 44, height: 44)
                 }
             }
         }

@@ -10,6 +10,8 @@ import AVFoundation
 import Speech
 import Accelerate
 import CoreGraphics
+import Combine
+import AudioToolbox
 
 @MainActor
 final class VoiceChatManager: ObservableObject {
@@ -21,8 +23,8 @@ final class VoiceChatManager: ObservableObject {
     /// UI level 0...1 computed from mic buffers (animate vortex)
     @Published var audioLevel: CGFloat = 0.0
 
-    /// Callback to add messages to chat when in conversation mode
-    var onMessageReceived: ((String, Bool) -> Void)? // (text, isUser)
+    /// Publisher for voice messages (text, isUser)
+    let messagePublisher = PassthroughSubject<(String, Bool), Never>()
 
     private let api = APIClient()
     private let playback = AudioPlayback.shared
@@ -38,6 +40,9 @@ final class VoiceChatManager: ObservableObject {
     private var lastSpeechAt: CFAbsoluteTime = CFAbsoluteTimeGetCurrent()
     private let silenceMs: Double = 2000  // 2 seconds - allows natural pauses mid-sentence
     private var monitorTimer: Timer?
+
+    // Thinking sound timer for continuous feedback during wait
+    private var thinkingSoundTimer: Timer?
 
     // MARK: Public control
 
@@ -68,6 +73,7 @@ final class VoiceChatManager: ObservableObject {
     func stopAll() {
         stopRecognition()
         stopMonitoring()
+        stopThinkingSoundLoop()
         stopPlayback()
         localTTS.stop()
         state = .idle
@@ -229,18 +235,22 @@ final class VoiceChatManager: ObservableObject {
 
     private func askAndSpeak(_ text: String) async {
         // Add user message to chat
-        onMessageReceived?(text, true)
+        messagePublisher.send((text, true))
 
         do {
+            // Start thinking sound while waiting for response
+            startThinkingSoundLoop()
+
             var history: [Message] = [Message(role: .user, content: text)]
             let res = try await api.ask(messages: history)
             history.append(Message(role: .assistant, content: res.reply))
 
             // Add assistant response to chat
-            onMessageReceived?(res.reply, false)
+            messagePublisher.send((res.reply, false))
 
             // Try backend TTS first
             do {
+                stopThinkingSoundLoop()
                 state = .speaking
                 let audio = try await api.speak(res.reply)
                 try await MainActor.run { try playback.play(data: audio) }
@@ -262,6 +272,28 @@ final class VoiceChatManager: ObservableObject {
 
     private func stopPlayback() {
         // AudioPlayback is short-lived; new clips interrupt automatically.
+    }
+
+    // MARK: Thinking sounds
+
+    /// Starts a repeating soft sound to indicate the device is processing
+    private func startThinkingSoundLoop() {
+        stopThinkingSoundLoop() // Clean up any existing timer
+
+        // Play first sound immediately
+        AudioServicesPlaySystemSound(1103) // Soft "tink" sound
+
+        // Then repeat every 1.2 seconds for a gentle, unintrusive rhythm
+        thinkingSoundTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { _ in
+            AudioServicesPlaySystemSound(1103)
+        }
+        RunLoop.main.add(thinkingSoundTimer!, forMode: .common)
+    }
+
+    /// Stops the thinking sound loop
+    private func stopThinkingSoundLoop() {
+        thinkingSoundTimer?.invalidate()
+        thinkingSoundTimer = nil
     }
 
     // MARK: Permissions helper
