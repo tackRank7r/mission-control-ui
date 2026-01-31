@@ -72,7 +72,7 @@ final class APIClient {
         }
 
         let payload: [String: Any] = [
-            "messages": messages.map { ["role": $0.role, "content": $0.content] }
+            "messages": messages.map { ["role": $0.role.rawValue, "content": $0.content] }
         ]
 
         request.httpBody = try JSONSerialization.data(withJSONObject: payload, options: [])
