@@ -432,27 +432,55 @@ curl https://cgptproject-v2.onrender.com/health
 
 ---
 
-## 🚨 iOS Launch Screen - CRITICAL REQUIREMENT
+## 🚨 iOS Launch Screen / Full-Screen Display - CRITICAL REQUIREMENT
 
-**Problem:** App displays with black bars (letterboxing) on iPhone, limiting the screen to old 3.5" or 4" device sizes.
+**Problem:** App displays with black bars (letterboxing) on iPhone, limiting the screen to old 3.5" or 4" device sizes. Screen height reports ~568 instead of ~852.
 
-**Root Cause:** iOS requires a launch screen storyboard for apps to support modern screen sizes. Without it, the app defaults to legacy device dimensions.
+**Root Cause:** iOS requires `UILaunchStoryboardName` to be set for apps to support modern screen sizes. Without it, the app defaults to legacy device dimensions.
 
-**Solution:**
-1. Ensure `launchScreen.storyboard` exists in the project
-2. Verify Xcode project configuration has:
+### Why this was persistently hard to fix
+
+This issue required **three separate fixes** across multiple sessions because of a subtle Xcode configuration trap:
+
+1. **Wrong Xcode project**: The repo has TWO `.xcodeproj` files — `SideKick360.xcodeproj` and `JarvisClient.xcodeproj`. The first fix only updated SideKick360, but the app was being built from JarvisClient.
+
+2. **Build settings were silently ignored**: `JarvisClient.xcodeproj` has `GENERATE_INFOPLIST_FILE = NO`. This means **all `INFOPLIST_KEY_` prefixed build settings are completely ignored by Xcode** — they only take effect when Xcode auto-generates the Info.plist. Setting `INFOPLIST_KEY_UILaunchStoryboardName = LaunchScreen` in build settings did nothing.
+
+3. **The actual fix**: `UILaunchStoryboardName` must be added **directly to `Info.plist`** when `GENERATE_INFOPLIST_FILE = NO`.
+
+### Complete fix checklist
+
+All three of these must be correct:
+
+1. **Info.plist** (`ios/JarvisClient/JarvisClient/Info.plist`) must contain:
+   ```xml
+   <key>UILaunchStoryboardName</key>
+   <string>LaunchScreen</string>
    ```
-   INFOPLIST_KEY_UILaunchStoryboardName = launchScreen;
-   ```
-   **NOT** `AppIcon` or any other value
+   This is the **only fix that actually matters** when `GENERATE_INFOPLIST_FILE = NO`.
 
-**Fix Location:** `ios/JarvisClient/SideKick360.xcodeproj/project.pbxproj`
+2. **LaunchScreen.storyboard** must exist at `ios/JarvisClient/LaunchScreen.storyboard` (capital L, capital S).
 
-**Why This Matters:**
-- Launch screen storyboard tells iOS the app can handle all screen sizes
-- Without it, iOS assumes the app only supports old device sizes and letterboxes the content
-- This is true for both UIKit and SwiftUI apps
-- The launch screen should replicate a simplified version of the app's initial screen for faster perceived launch times
+3. **project.pbxproj** file references must use correct casing (`LaunchScreen.storyboard`, not `launchScreen.storyboard`).
+
+### How to verify
+
+The app displays `v1.30.2 h:XXX` in the header badge. The height value confirms whether full-screen is working:
+- **h:852** (or similar 800+) = full screen, working correctly
+- **h:568** or **h:667** = letterboxed, launch screen fix not applied
+
+### Key lesson: `GENERATE_INFOPLIST_FILE = NO`
+
+When this setting is `NO` in the Xcode project:
+- The `Info.plist` file is used **exactly as-is**
+- All `INFOPLIST_KEY_*` build settings are **ignored**
+- Any plist keys you need must be added **directly to Info.plist**
+- This is a common trap when projects are created with auto-generation then switched to manual
+
+### After fixing, the user MUST:
+1. **Delete the app** from device (long press → Remove App) — iOS caches launch screen config
+2. **Clean Build Folder** in Xcode (Cmd+Shift+K)
+3. Rebuild and Run (Cmd+R)
 
 **Reference:** [Stack Overflow: iOS app with black bars](https://stackoverflow.com/questions/tagged/ios+launch-screen)
 
@@ -462,6 +490,8 @@ curl https://cgptproject-v2.onrender.com/health
 
 | Date | Change |
 |------|--------|
+| 2026-01-31 | **Fixed persistent letterboxing**: UILaunchStoryboardName must be in Info.plist directly (not build settings) when GENERATE_INFOPLIST_FILE=NO |
+| 2026-01-31 | Added screen height debug display (v1.30.2 h:XXX) to verify full-screen fix |
 | 2026-01-28 | **Hybrid routing**: ElevenLabs Agents preferred, Twilio fallback with $20/week and 4 calls/week limits |
 | 2026-01-28 | Added `is_admin` to User, `routing_type` to CallTask, `/usage` endpoint |
 | 2026-01-27 | Added ElevenLabs TTS integration |
@@ -471,4 +501,4 @@ curl https://cgptproject-v2.onrender.com/health
 
 ---
 
-*Last updated: January 28, 2026*
+*Last updated: January 31, 2026*
