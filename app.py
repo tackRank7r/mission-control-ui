@@ -1148,6 +1148,19 @@ def _extract_user_text(body: dict) -> str:
     return ""
 
 
+def _extract_messages(body: dict) -> list:
+    """Extract the full conversation history from the request body."""
+    if "messages" in body and isinstance(body["messages"], list):
+        result = []
+        for m in body["messages"]:
+            if isinstance(m, dict) and m.get("role") and m.get("content"):
+                result.append({"role": m["role"], "content": m["content"]})
+        return result
+    # Fallback: single message
+    text = _extract_user_text(body)
+    return [{"role": "user", "content": text}] if text else []
+
+
 PHONE_AGENT_SYSTEM_PROMPT = """You are Tori, a friendly and natural-sounding AI phone assistant calling on behalf of your user.
 
 CONVERSATION RULES:
@@ -1171,33 +1184,58 @@ EXAMPLES OF BAD RESPONSES (too robotic/formal):
 """
 
 
-def _chat_llm(user_text: str) -> str:
+CHAT_SYSTEM_PROMPT = """You are SideKick, a helpful and friendly AI assistant with the ability to schedule real outgoing phone calls on behalf of the user.
+
+Format your responses for easy reading:
+- Use emojis naturally to make responses more engaging and friendly
+- Use bullet points for lists and steps
+- Use line breaks to separate ideas
+- Keep responses concise but well-formatted
+- Add relevant emojis for context
+
+PHONE CALL CAPABILITY:
+When the user wants to make a phone call (e.g. "make a phone call", "call someone", "schedule a call"), you MUST gather the following information by asking clear questions one at a time:
+
+1. **Who** should be called? (person or business name)
+2. **Phone number** — ask for the full phone number including country code
+3. **Purpose** — what is the objective of the call? (e.g. make a reservation, schedule an appointment, follow up on an order, etc.)
+4. **Key details** — any specific info needed for the call (e.g. party size, preferred time, order number, talking points)
+5. **Special instructions** — anything specific the AI phone agent should say or avoid saying
+
+Ask these questions conversationally, one or two at a time. Once you have ALL the required info (at minimum: name, phone number, and purpose), confirm the details with the user and output the following marker on its own line at the END of your message:
+
+READY_TO_CALL:{"target_name":"<name>","target_phone":"<phone>","objective":"<purpose>","context":<json object with details>,"call_script":"<optional script or instructions>"}
+
+IMPORTANT RULES FOR PHONE CALLS:
+- NEVER skip the information gathering. Always ask the questions.
+- Phone number is REQUIRED. Do not proceed without it.
+- The READY_TO_CALL marker must be valid JSON after the colon.
+- Only output READY_TO_CALL when you have confirmed the details with the user.
+- After outputting READY_TO_CALL, also include a friendly confirmation message like "I'm scheduling that call for you now!"
+
+Be warm, conversational, and helpful. Make your responses visually scannable and easy to read."""
+
+
+def _chat_llm(user_text: str, messages: list = None) -> str:
     if not OPENAI_API_KEY or not OpenAI:
         return f"You said: {user_text}"
 
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
 
-        system_prompt = (
-            "You are Jarvis, a helpful and friendly AI assistant. "
-            "Format your responses for easy reading:\n"
-            "- Use emojis naturally to make responses more engaging and friendly 😊\n"
-            "- Use bullet points (•) for lists and steps\n"
-            "- Use line breaks to separate ideas\n"
-            "- Keep responses concise but well-formatted\n"
-            "- For recipes, instructions, or multi-step tasks, use numbered lists or bullet points\n"
-            "- Add relevant emojis for context (🍕 for food, 📅 for calendar, ✅ for completed tasks, etc.)\n\n"
-            "Be warm, conversational, and helpful. Make your responses visually scannable and easy to read."
-        )
+        chat_messages = [{"role": "system", "content": CHAT_SYSTEM_PROMPT}]
+
+        if messages and len(messages) > 1:
+            # Use full conversation history for multi-turn context
+            chat_messages.extend(messages)
+        else:
+            chat_messages.append({"role": "user", "content": user_text})
 
         completion = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_text},
-            ],
+            messages=chat_messages,
             temperature=0.7,
-            max_tokens=300
+            max_tokens=400
         )
 
         reply = (completion.choices[0].message.content or "").strip()
@@ -1274,28 +1312,134 @@ def _phone_agent_chat(call: 'CallTask', speech_result: str) -> str:
 
 
 # -------- Chat (modern + legacy) --------
+def _try_schedule_call(reply: str, user_id: int) -> Optional[dict]:
+    """
+    Check if the LLM reply contains a READY_TO_CALL marker.
+    If so, parse it and create a CallTask. Returns call info dict or None.
+    """
+    marker = "READY_TO_CALL:"
+    idx = reply.find(marker)
+    if idx == -1:
+        return None
+
+    json_str = reply[idx + len(marker):].strip()
+    # Handle case where there's text after the JSON block
+    # Find the matching closing brace
+    brace_depth = 0
+    end_idx = 0
+    for i, ch in enumerate(json_str):
+        if ch == '{':
+            brace_depth += 1
+        elif ch == '}':
+            brace_depth -= 1
+            if brace_depth == 0:
+                end_idx = i + 1
+                break
+
+    if end_idx == 0:
+        return None
+
+    try:
+        call_data = json.loads(json_str[:end_idx])
+    except json.JSONDecodeError:
+        app.logger.warning(f"Failed to parse READY_TO_CALL JSON: {json_str[:end_idx]}")
+        return None
+
+    if not call_data.get("target_phone"):
+        return None
+
+    try:
+        use_agent = _should_use_elevenlabs_agent(user_id)
+
+        call = CallTask(
+            user_id=user_id,
+            status="scheduled",
+            target_name=call_data.get("target_name"),
+            target_phone=call_data["target_phone"],
+            objective=call_data.get("objective"),
+            context=json.dumps(call_data.get("context")) if call_data.get("context") else None,
+            call_script=call_data.get("call_script"),
+            scheduled_at=datetime.utcnow(),
+            routing_type="elevenlabs_agent" if use_agent else "twilio_custom"
+        )
+        db.session.add(call)
+        db.session.commit()
+
+        log_call_event(call.id, "created", {
+            "target_phone": call.target_phone,
+            "scheduled_at": call.scheduled_at.isoformat(),
+            "routing_type": call.routing_type,
+            "source": "chat_auto_schedule"
+        })
+
+        # Route via ElevenLabs if available
+        if use_agent:
+            try:
+                result = _initiate_elevenlabs_agent_call(call)
+                call.status = "in_progress"
+                call.started_at = datetime.utcnow()
+                call.twilio_call_sid = result.get("callSid")
+                db.session.commit()
+                log_call_event(call.id, "started", {
+                    "routing_type": "elevenlabs_agent",
+                    "conversation_id": result.get("conversation_id"),
+                })
+            except Exception as agent_err:
+                app.logger.warning(f"ElevenLabs Agent call failed, falling back to Twilio: {agent_err}")
+                call.routing_type = "twilio_custom"
+                db.session.commit()
+
+        return {
+            "call_id": call.id,
+            "status": call.status,
+            "routing_type": call.routing_type,
+            "target_name": call.target_name,
+            "target_phone": call.target_phone,
+        }
+    except Exception as e:
+        app.logger.exception(f"Auto-schedule call failed: {e}")
+        return None
+
+
 @app.post("/ask")
 @require_bearer
 def ask():
     try:
         body = request.get_json(force=True, silent=True) or {}
         user_text = _extract_user_text(body)
+        messages = _extract_messages(body)
         if not user_text:
             return jsonify(error="empty_user_text"), 400
 
-        reply = _chat_llm(user_text)
+        reply = _chat_llm(user_text, messages=messages)
+
+        # Check for READY_TO_CALL marker and auto-schedule
+        u = current_user()
+        call_info = _try_schedule_call(reply, u.id)
+
+        # Strip the READY_TO_CALL marker from the reply shown to the user
+        marker = "READY_TO_CALL:"
+        if marker in reply:
+            clean_reply = reply[:reply.find(marker)].strip()
+            if not clean_reply:
+                clean_reply = reply
+        else:
+            clean_reply = reply
 
         # Persist chat
-        u = current_user()
         sess = ChatSession(user_id=u.id, title=user_text[:40] or "New chat")
         db.session.add(sess)
         db.session.commit()
 
         db.session.add(ChatMessage(session_id=sess.id, role="user", content=user_text))
-        db.session.add(ChatMessage(session_id=sess.id, role="assistant", content=reply))
+        db.session.add(ChatMessage(session_id=sess.id, role="assistant", content=clean_reply))
         db.session.commit()
 
-        return jsonify(reply=reply), 200
+        result = {"reply": clean_reply}
+        if call_info:
+            result["call_scheduled"] = call_info
+
+        return jsonify(result), 200
     except Exception as e:
         app.logger.exception("ask failed")
         return jsonify(error="server_error", detail=str(e)), 500
@@ -1305,6 +1449,7 @@ def ask():
 @require_bearer
 def chat_legacy():
     try:
+        messages = []
         if request.method == "GET":
             user_text = ""
             for k in ["prompt", "user_text", "text", "message", "query", "q", "input", "userText"]:
@@ -1317,11 +1462,12 @@ def chat_legacy():
             if not body and request.form:
                 body = {k: request.form.get(k) for k in request.form}
             user_text = _extract_user_text(body)
+            messages = _extract_messages(body)
 
         if not user_text:
             return jsonify(error="empty_user_text"), 400
 
-        reply = _chat_llm(user_text)
+        reply = _chat_llm(user_text, messages=messages)
 
         u = current_user()
         sess = ChatSession(user_id=u.id, title=user_text[:40] or "New chat")
