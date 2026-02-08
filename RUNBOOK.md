@@ -173,7 +173,7 @@ ELEVENLABS_PHONE_NUMBER_ID=your_phone_id    # From ElevenLabs dashboard
 ```bash
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
-TWILIO_FROM_NUMBER=+12568604020
+TWILIO_FROM_NUMBER=+1XXXXXXXXXX
 ```
 
 ### TTS Fallbacks
@@ -293,14 +293,14 @@ Week resets every Monday 00:00 UTC.
 ### Call Scheduler (Primary — Twilio custom calls only)
 - **Trigger:** Every 30 seconds
 - **Flow:** Poll `/n8n/pending-calls` → Split items → Mark started → Initiate Twilio call → Update call SID
-- **n8n URL:** https://fdaf.app.n8n.cloud
+- **n8n URL:** https://YOUR-N8N-INSTANCE.app.n8n.cloud
 - **Note:** Only picks up calls with `routing_type: "twilio_custom"` (those not routed to ElevenLabs Agents)
 
 ### Configuration Required in n8n
 
 1. **Variables:**
-   - `JARVIS_BACKEND_URL` = `https://cgptproject-v2.onrender.com`
-   - `TWILIO_FROM_NUMBER` = `+12568604020`
+   - `JARVIS_BACKEND_URL` = `https://YOUR-BACKEND.onrender.com`
+   - `TWILIO_FROM_NUMBER` = `+1XXXXXXXXXX`
 
 2. **Credentials:**
    - Twilio API (Account SID + Auth Token)
@@ -344,7 +344,7 @@ git add . && git commit -m "message" && git push origin main
 
 1. Go to [ElevenLabs dashboard](https://elevenlabs.io) → Conversational AI → Create Agent
 2. Configure the agent with Tori's voice and personality
-3. Connect your Twilio phone number (+12568604020) under the agent's phone settings
+3. Connect your Twilio phone number (+1XXXXXXXXXX) under the agent's phone settings
 4. Copy the **Agent ID** and **Phone Number ID**
 5. Set env vars on Render:
    - `ELEVENLABS_AGENT_ID` = your agent ID
@@ -388,7 +388,7 @@ git add . && git commit -m "message" && git push origin main
 
 ### Schedule a Test Call
 ```bash
-curl -X POST "https://cgptproject-v2.onrender.com/call/schedule" \
+curl -X POST "https://YOUR-BACKEND.onrender.com/call/schedule" \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"target_phone":"+1XXXXXXXXXX","target_name":"Test","objective":"test"}'
@@ -397,25 +397,25 @@ Response includes `routing_type` showing which stack handled the call.
 
 ### Check Usage / Routing Status
 ```bash
-curl "https://cgptproject-v2.onrender.com/usage" \
+curl "https://YOUR-BACKEND.onrender.com/usage" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
 ### Check Pending Calls (Twilio custom only)
 ```bash
-curl https://cgptproject-v2.onrender.com/n8n/pending-calls
+curl https://YOUR-BACKEND.onrender.com/n8n/pending-calls
 ```
 
 ### Clear a Failed Call
 ```bash
-curl -X POST "https://cgptproject-v2.onrender.com/n8n/call/CALL_ID/error" \
+curl -X POST "https://YOUR-BACKEND.onrender.com/n8n/call/CALL_ID/error" \
   -H "Content-Type: application/json" \
   -d '{"error":"Manual clear"}'
 ```
 
 ### Test Health
 ```bash
-curl https://cgptproject-v2.onrender.com/health
+curl https://YOUR-BACKEND.onrender.com/health
 ```
 
 ---
@@ -424,8 +424,8 @@ curl https://cgptproject-v2.onrender.com/health
 
 | Service | URL |
 |---------|-----|
-| Backend | https://cgptproject-v2.onrender.com |
-| n8n | https://fdaf.app.n8n.cloud |
+| Backend | https://YOUR-BACKEND.onrender.com |
+| n8n | https://YOUR-N8N-INSTANCE.app.n8n.cloud |
 | Render Dashboard | https://dashboard.render.com |
 | Twilio Console | https://console.twilio.com |
 | ElevenLabs | https://elevenlabs.io |

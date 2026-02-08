@@ -7,11 +7,11 @@ import Foundation
 enum Secrets {
     /// Base URL of the deployed backend (no trailing slash).
     /// Example: https://cgptproject-v2.onrender.com
-    static let baseURL = URL(string: "https://cgptproject-v2.onrender.com")!
+    static let baseURL = URL(string: "https://YOUR-BACKEND.onrender.com")!
 
     /// Bearer token for the backend, if you use one.
     /// Leave empty if your backend doesn’t expect it.
-    static let backendBearer = "FEFEGTGT696969546TY54654745"
+    static let backendBearer = "YOUR_BEARER_TOKEN_HERE"
 
     /// Mutable copy of the current auth token. If non-nil this wins over backendBearer.
     static var authToken: String? = nil

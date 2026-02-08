@@ -423,7 +423,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = BH5H4LS7X5;
+				DEVELOPMENT_TEAM = TEAM_ID_HERE;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = JarvisClient/Info.plist;
@@ -442,7 +442,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.Snowman.identifier.JarvisClient;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.JarvisClient;
 				PRODUCT_NAME = "JarvisClient\n";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_OBJC_BRIDGING_HEADER = "JarvisClient/JarvisClient-Bridging-Header.h";
@@ -461,7 +461,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = BH5H4LS7X5;
+				DEVELOPMENT_TEAM = TEAM_ID_HERE;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = JarvisClient/Info.plist;
@@ -480,7 +480,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = com.Snowman.identifier.JarvisClient;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.JarvisClient;
 				PRODUCT_NAME = "JarvisClient\n";
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_OBJC_BRIDGING_HEADER = "JarvisClient/JarvisClient-Bridging-Header.h";

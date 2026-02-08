@@ -45,8 +45,7 @@ struct ContentView: View {
                     onDismiss: { showMenu = false },
                     onMakePhoneCall: {
                         showMenu = false
-                        inputText = "Make a phone call"
-                        isInputFocused = true
+                        vm.send("Make a phone call")
                     }
                 )
             }
@@ -73,7 +72,7 @@ struct ContentView: View {
                 HStack(spacing: 6) {
                     Text(vm.agentName)
                         .font(.system(size: 22, weight: .semibold))
-                    Text("v1.30.2 h:\(Int(UIScreen.main.bounds.height))")
+                    Text("v1.30.2")
                         .font(.system(size: 11, weight: .medium))
                         .foregroundColor(.secondary)
                         .padding(.horizontal, 6)
@@ -87,13 +86,6 @@ struct ContentView: View {
             }
 
             Spacer()
-
-            Button {
-                // You can wire this to a help view if you like.
-            } label: {
-                Image(systemName: "questionmark.circle")
-                    .font(.system(size: 22, weight: .semibold))
-            }
         }
         .padding(.horizontal)
         .padding(.top, 12)
@@ -110,7 +102,18 @@ struct ContentView: View {
                     ForEach(vm.messages) { msg in
                         ChatBubbleView(
                             side: msg.role == .me ? .me : .bot,
-                            text: msg.text
+                            text: msg.text,
+                            onCopy: msg.role == .bot ? {
+                                UIPasteboard.general.string = msg.text
+                            } : nil,
+                            onToggleSources: msg.role == .bot ? {
+                                vm.toggleSources(for: msg.id)
+                            } : nil,
+                            onSpeak: msg.role == .bot ? {
+                                Task { await speakMessage(msg.text) }
+                            } : nil,
+                            showingSources: vm.sourcesVisible.contains(msg.id),
+                            sourceCount: vm.sourceCount(for: msg.id)
                         )
                         .id(msg.id)
                     }
@@ -177,9 +180,11 @@ struct ContentView: View {
                         Circle()
                             .fill(Color.secondary.opacity(0.1))
 
-                        Image(systemName: voiceManager.state == .idle ? "mic.fill" : "stop.circle.fill")
+                        Image(systemName: voiceManager.state == .idle ? "mic.fill" :
+                                voiceManager.state == .speaking ? "hand.raised.fill" : "stop.circle.fill")
                             .font(.system(size: 20))
-                            .foregroundColor(voiceManager.state == .idle ? .blue : .red)
+                            .foregroundColor(voiceManager.state == .idle ? .blue :
+                                voiceManager.state == .speaking ? .orange : .red)
                     }
                     .frame(width: 44, height: 44)
                 }
@@ -191,6 +196,17 @@ struct ContentView: View {
     }
 
     // MARK: - Actions
+
+    private func speakMessage(_ text: String) async {
+        let api = APIClient()
+        let cleanText = text.strippingForTTS
+        do {
+            let audio = try await api.speak(cleanText)
+            try AudioPlayback.shared.play(data: audio)
+        } catch {
+            await LocalTTS.shared.speak(cleanText, language: Locale.current.identifier)
+        }
+    }
 
     private func handleSend() {
         let text = trimmedInput

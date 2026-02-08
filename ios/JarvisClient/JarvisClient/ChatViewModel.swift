@@ -3,7 +3,8 @@
 //  - Local ChatMessage model for UI
 //  - Agent name (user-renamable, default "SideKick")
 //  - READY_TO_CALL → CallService hook
-//  - Safe stubbed sendToBackend (no JSON / no network)
+//  - Real backend via APIClient.ask()
+//  - Source count tracking for citations
 
 import Foundation
 import SwiftUI
@@ -41,10 +42,15 @@ final class ChatViewModel: ObservableObject {
     /// Current assistant / agent display name (shown in the header).
     @Published var agentName: String
 
+    /// Tracks which bot messages have their sources panel visible.
+    @Published var sourcesVisible: Set<UUID> = []
+
     /// Optional: email to send summaries to; can be set from login/profile.
     var userEmail: String?
 
+    private let api = APIClient()
     private let agentNameKey = "agentName"
+    private var sourceCounts: [UUID: Int] = [:]
 
     init(userEmail: String? = nil) {
         self.userEmail = userEmail
@@ -93,8 +99,19 @@ final class ChatViewModel: ObservableObject {
                 self.isSending = false
 
                 switch result {
-                case .success(let replyText):
-                    self.handleAssistantReply(replyText, originalUserText: trimmed)
+                case .success(let response):
+                    let botMessage = ChatMessage(role: .bot, text: response.reply)
+                    self.messages.append(botMessage)
+
+                    // If the backend auto-scheduled a call, show confirmation
+                    if let callInfo = response.call_scheduled {
+                        let name = callInfo.target_name ?? "the number"
+                        let confirmMessage = ChatMessage(
+                            role: .bot,
+                            text: "Your call to \(name) has been scheduled and will start shortly. I'll email you a summary when it's done."
+                        )
+                        self.messages.append(confirmMessage)
+                    }
 
                 case .failure(let error):
                     let errorMessage = ChatMessage(
@@ -107,108 +124,68 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    // MARK: - Assistant reply handling
+    // MARK: - Backend wiring
 
-    private func handleAssistantReply(_ replyText: String, originalUserText: String) {
-        // 1) First, see if this is telling us to start a call.
-        if handleCallIntentIfPresent(in: replyText, originalUserText: originalUserText) {
-            return
-        }
-
-        // 2) Otherwise, treat as a normal bot message.
-        let botMessage = ChatMessage(role: .bot, text: replyText)
-        messages.append(botMessage)
-    }
-
-    /// Looks for a READY_TO_CALL marker and phone number in the assistant text.
-    /// If found, starts the backend Twilio call and posts a friendly message instead
-    /// of the raw control text.
-    private func handleCallIntentIfPresent(
-        in rawText: String,
-        originalUserText: String
-    ) -> Bool {
-        guard rawText.uppercased().contains("READY_TO_CALL") else {
-            return false
-        }
-
-        // Very forgiving parse: search for a line containing "Number:" or "Phone:"
-        // and collect digits / optional +.
-        let lines = rawText.components(separatedBy: .newlines)
-        var phoneCandidate: String?
-
-        for line in lines {
-            let lower = line.lowercased()
-            if lower.contains("number:") || lower.contains("phone:") {
-                if let idx = line.firstIndex(of: ":") {
-                    let afterColon = line[line.index(after: idx)...]
-                    let digits = afterColon.filter { $0.isNumber || $0 == "+" }
-                    if !digits.isEmpty {
-                        phoneCandidate = String(digits)
-                        break
-                    }
-                }
-            }
-        }
-
-        guard let rawNumber = phoneCandidate else {
-            // We saw READY_TO_CALL but couldn't find a number – surface a clear message.
-            let fallback = ChatMessage(
-                role: .bot,
-                text: """
-                      I tried to start the call, but I couldn't parse a phone number \
-                      from this response:
-
-                      \(rawText)
-                      """
-            )
-            messages.append(fallback)
-            return true
-        }
-
-        let friendly = ChatMessage(
-            role: .bot,
-            text: "I’m calling now and will email you a summary of the conversation once it’s finished."
-        )
-        messages.append(friendly)
-
-        // Fire-and-forget backend call; we don’t block the UI on this.
-        CallService.shared.startCall(
-            phoneNumber: rawNumber,
-            instructions: originalUserText,
-            userEmail: userEmail
-        ) { [weak self] result in
-            Task { @MainActor in
-                guard let self else { return }
-
-                switch result {
-                case .success:
-                    // Optional: append a subtle “call started” marker if you want.
-                    break
-
-                case .failure(let error):
-                    let errorMessage = ChatMessage(
-                        role: .bot,
-                        text: "I tried to start the call, but there was an error: \(error.localizedDescription)"
-                    )
-                    self.messages.append(errorMessage)
-                }
-            }
-        }
-
-        return true
-    }
-
-    // MARK: - Backend wiring (temporary stub)
-
-    /// TEMP: Stubbed backend so we *never* hit JSONSerialization here.
-    /// Replace this later with your real API client once everything is stable.
     private func sendToBackend(
         prompt: String,
-        completion: @escaping (Result<String, Error>) -> Void
+        completion: @escaping (Result<AskResponse, Error>) -> Void
     ) {
-        // Simulate a short network delay and return a canned response.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            completion(.success("Stub reply from backend – replace sendToBackend in ChatViewModel.swift."))
+        // Convert ChatMessage history to Message objects for the API
+        var apiMessages: [Message] = messages.compactMap { msg in
+            switch msg.role {
+            case .me:    return Message(role: .user, content: msg.text)
+            case .bot:   return Message(role: .assistant, content: msg.text)
+            case .system: return Message(role: .system, content: msg.text)
+            }
         }
+
+        Task {
+            // Enrich the last user message with contact info if a name is found
+            if let match = await ContactsManager.shared.findContactInText(prompt) {
+                if let lastIdx = apiMessages.lastIndex(where: { $0.role == .user }) {
+                    let original = apiMessages[lastIdx].content
+                    apiMessages[lastIdx] = Message(
+                        role: .user,
+                        content: "\(original)\n[Device found contact: \(match.name) — \(match.phone)]"
+                    )
+                }
+            }
+
+            do {
+                let response = try await api.ask(messages: apiMessages)
+                completion(.success(response))
+            } catch {
+                completion(.failure(error))
+            }
+        }
+    }
+
+    // MARK: - Source tracking
+
+    func toggleSources(for messageID: UUID) {
+        if sourcesVisible.contains(messageID) {
+            sourcesVisible.remove(messageID)
+        } else {
+            sourcesVisible.insert(messageID)
+        }
+    }
+
+    func sourceCount(for messageID: UUID) -> Int {
+        sourceCounts[messageID] ?? 0
+    }
+
+    func setSourceCount(_ count: Int, for messageID: UUID) {
+        sourceCounts[messageID] = count
+    }
+
+    /// Count citation patterns like [1], [2], etc. in text.
+    static func countSources(in text: String) -> Int {
+        guard let regex = try? NSRegularExpression(pattern: #"\[(\d+)\]"#) else { return 0 }
+        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+        let uniqueNumbers = Set(matches.compactMap { match -> String? in
+            guard let range = Range(match.range(at: 1), in: text) else { return nil }
+            return String(text[range])
+        })
+        return uniqueNumbers.count
     }
 }

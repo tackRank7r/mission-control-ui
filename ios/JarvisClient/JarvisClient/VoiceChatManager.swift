@@ -44,6 +44,12 @@ final class VoiceChatManager: ObservableObject {
     // Thinking sound timer for continuous feedback during wait
     private var thinkingSoundTimer: Timer?
 
+    // Conversation history for multi-turn context (persists across voice turns)
+    private var conversationHistory: [Message] = []
+
+    // Source count publisher (fires after audio starts, not before)
+    let sourceCountPublisher = PassthroughSubject<(String, Int), Never>()
+
     // MARK: Public control
 
     /// Shows vortex immediately, then requests permissions and starts recognition.
@@ -60,8 +66,13 @@ final class VoiceChatManager: ObservableObject {
 
     func toggle() {
         switch state {
-        case .idle: Task { await requestAndStart() }
-        case .listening, .thinking, .speaking: stopAll()
+        case .idle:
+            Task { await requestAndStart() }
+        case .speaking:
+            // Interrupt playback and resume listening immediately
+            Task { await interruptAndListen() }
+        case .listening, .thinking:
+            stopAll()
         }
     }
 
@@ -79,6 +90,8 @@ final class VoiceChatManager: ObservableObject {
         state = .idle
         partialTranscript = ""
         audioLevel = 0
+        // Keep conversationHistory so context is maintained across sessions.
+        // It resets naturally when a new conversation starts via the button tap.
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
@@ -86,13 +99,28 @@ final class VoiceChatManager: ObservableObject {
 
     func startListening() async {
         state = .listening  // Always set to listening when we start
-        do {
-            try configureSession()
-            try startRecognition()
-            startMonitoring()
-        } catch {
-            lastError = (error as NSError).localizedDescription
-            stopAll()
+
+        // Retry once if the audio engine fails to start (common after playback)
+        for attempt in 0..<2 {
+            do {
+                try configureSession()
+                try startRecognition()
+                startMonitoring()
+                return // success
+            } catch {
+                #if DEBUG
+                print("VoiceChatManager: startListening attempt \(attempt) failed: \(error)")
+                #endif
+                stopRecognition() // clean up partial state
+                if attempt == 0 {
+                    // Brief pause before retry
+                    try? await Task.sleep(nanoseconds: 300_000_000)
+                    if state != .listening { return }
+                } else {
+                    lastError = (error as NSError).localizedDescription
+                    stopAll()
+                }
+            }
         }
     }
 
@@ -107,14 +135,12 @@ final class VoiceChatManager: ObservableObject {
         partialTranscript = ""
         audioLevel = 0
 
-        // Build request
+        // Build request — prefer on-device but allow server fallback on cellular
         let req = SFSpeechAudioBufferRecognitionRequest()
         req.shouldReportPartialResults = true
-        if #available(iOS 13.0, *) {
-            if (recognizer?.supportsOnDeviceRecognition ?? SFSpeechRecognizer()?.supportsOnDeviceRecognition ?? false) {
-                req.requiresOnDeviceRecognition = true
-            }
-        }
+        // Don't set requiresOnDeviceRecognition = true; it blocks recognition
+        // entirely when the on-device model isn't available. Let iOS decide
+        // the best path (on-device when available, server when not).
         request = req
 
         // Audio tap
@@ -234,44 +260,212 @@ final class VoiceChatManager: ObservableObject {
     }
 
     private func askAndSpeak(_ text: String) async {
-        // Add user message to chat
         messagePublisher.send((text, true))
 
         do {
-            // Start thinking sound while waiting for response
             startThinkingSoundLoop()
 
-            var history: [Message] = [Message(role: .user, content: text)]
-            let res = try await api.ask(messages: history)
-            history.append(Message(role: .assistant, content: res.reply))
+            // Enrich message with contact phone number if a name is mentioned
+            var enrichedText = text
+            if let match = await ContactsManager.shared.findContactInText(text) {
+                enrichedText = "\(text)\n[Device found contact: \(match.name) — \(match.phone)]"
+            }
 
-            // Add assistant response to chat
+            // Append user message to persistent conversation history
+            conversationHistory.append(Message(role: .user, content: enrichedText))
+            let res = try await api.ask(messages: conversationHistory)
+            conversationHistory.append(Message(role: .assistant, content: res.reply))
+
             messagePublisher.send((res.reply, false))
 
-            // Try backend TTS first
-            do {
-                stopThinkingSoundLoop()
-                state = .speaking
-                let audio = try await api.speak(res.reply)
-                try await MainActor.run { try playback.play(data: audio) }
+            stopThinkingSoundLoop()
+            state = .speaking
 
-                // Resume listening shortly after playback begins (keep loop snappy)
-                try? await Task.sleep(nanoseconds: 300_000_000)
-                await startListening()
-            } catch {
-                // Fallback to on-device TTS
+            let cleanText = res.reply.strippingForTTS
+
+            // Publish source count AFTER audio starts (don't block TTS)
+            let sourceCount = ChatViewModel.countSources(in: res.reply)
+
+            // Stop the audio engine during playback so the mic doesn't
+            // pick up the speaker output and create a feedback loop.
+            stopRecognition()
+
+            // Try fast path: complete audio in <4 seconds
+            let result = await speakWithTimeout(cleanText, timeout: 4.0)
+
+            switch result {
+            case .complete(let data):
+                try await MainActor.run { try playback.play(data: data) }
+                if sourceCount > 0 {
+                    sourceCountPublisher.send((res.reply, sourceCount))
+                }
+                await waitForPlaybackEnd()
+                guard state == .speaking else { return }
+                await postPlaybackCooldownAndListen()
+
+            case .timedOut:
+                if sourceCount > 0 {
+                    sourceCountPublisher.send((res.reply, sourceCount))
+                }
+                await speakChunked(cleanText)
+                guard state == .speaking else { return }
+                await postPlaybackCooldownAndListen()
+
+            case .failed:
                 state = .speaking
-                await localTTS.speak(res.reply, language: Locale.current.identifier)
-                await startListening()
+                await localTTS.speak(cleanText, language: Locale.current.identifier)
+                guard state == .speaking else { return }
+                await postPlaybackCooldownAndListen()
             }
         } catch {
             lastError = (error as NSError).localizedDescription
+            stopThinkingSoundLoop()
             await startListening()
         }
     }
 
+    // MARK: - Chunked TTS
+
+    private enum SpeakResult {
+        case complete(Data)
+        case timedOut
+        case failed
+    }
+
+    /// Races api.speak() against a timeout. Returns whichever finishes first.
+    private func speakWithTimeout(_ text: String, timeout: TimeInterval) async -> SpeakResult {
+        await withTaskGroup(of: SpeakResult.self) { group in
+            group.addTask { [api] in
+                do {
+                    let data = try await api.speak(text)
+                    return .complete(data)
+                } catch {
+                    return .failed
+                }
+            }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                return .timedOut
+            }
+            let first = await group.next()!
+            group.cancelAll()
+            return first
+        }
+    }
+
+    /// Splits text at sentence boundaries and plays each chunk sequentially,
+    /// fetching the next chunk while the current one plays.
+    private func speakChunked(_ text: String) async {
+        let chunks = splitIntoThirds(text)
+        guard chunks.count > 1 else {
+            // Too short to split meaningfully — wait for full audio
+            do {
+                let data = try await api.speak(text)
+                try await MainActor.run { try playback.play(data: data) }
+                await waitForPlaybackEnd()
+            } catch {
+                await localTTS.speak(text, language: Locale.current.identifier)
+            }
+            return
+        }
+
+        for (index, chunk) in chunks.enumerated() {
+            guard state == .speaking else { break }
+
+            do {
+                let data = try await api.speak(chunk)
+                try await MainActor.run { try playback.play(data: data) }
+                await waitForPlaybackEnd()
+            } catch {
+                // Speak remaining chunks with local TTS
+                let remaining = chunks[index...].joined(separator: " ")
+                await localTTS.speak(remaining, language: Locale.current.identifier)
+                break
+            }
+        }
+    }
+
+    /// Split text into ~3 roughly equal parts at sentence boundaries.
+    private func splitIntoThirds(_ text: String) -> [String] {
+        let sentences = text.components(separatedBy: CharacterSet(charactersIn: ".!?"))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        guard sentences.count >= 3 else { return [text] }
+
+        let third = sentences.count / 3
+        let chunk1 = sentences[0..<third].joined(separator: ". ") + "."
+        let chunk2 = sentences[third..<(2 * third)].joined(separator: ". ") + "."
+        let chunk3 = sentences[(2 * third)...].joined(separator: ". ") + "."
+        return [chunk1, chunk2, chunk3]
+    }
+
+    /// Waits until AudioPlayback finishes or state changes.
+    private func waitForPlaybackEnd() async {
+        while playback.isPlaying && state == .speaking {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms poll
+        }
+    }
+
     private func stopPlayback() {
-        // AudioPlayback is short-lived; new clips interrupt automatically.
+        playback.stop()
+    }
+
+    // MARK: - Interrupt (barge-in via tap)
+
+    /// Stops AI audio playback immediately and resumes listening for user speech.
+    private func interruptAndListen() async {
+        playback.stop()
+        localTTS.stop()
+        stopRecognition()
+
+        // Brief pause to let audio output fully stop
+        try? await Task.sleep(nanoseconds: 300_000_000)
+
+        // Reset audio session for recording
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setActive(false, options: .notifyOthersOnDeactivation)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            #if DEBUG
+            print("VoiceChatManager: interrupt audio session reset error: \(error)")
+            #endif
+        }
+
+        await startListening()
+    }
+
+    // MARK: - Post-playback cooldown
+
+    /// Waits a short time after audio playback ends before restarting
+    /// speech recognition. This prevents the mic from picking up residual
+    /// speaker output and interpreting it as user speech (echo loop).
+    private func postPlaybackCooldownAndListen() async {
+        // 600ms cooldown lets speaker audio fully dissipate
+        try? await Task.sleep(nanoseconds: 600_000_000)
+        guard state == .speaking else { return }
+
+        // Fully reset the audio session before restarting recognition.
+        // After playback, the audio engine and session can be in a stale state
+        // that causes startRecognition() to fail silently.
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setActive(false, options: .notifyOthersOnDeactivation)
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms settle
+            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetooth])
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            // If audio session reset fails, try startListening anyway
+            #if DEBUG
+            print("VoiceChatManager: audio session reset error: \(error)")
+            #endif
+        }
+
+        guard state == .speaking else { return }
+        await startListening()
     }
 
     // MARK: Thinking sounds
@@ -281,11 +475,11 @@ final class VoiceChatManager: ObservableObject {
         stopThinkingSoundLoop() // Clean up any existing timer
 
         // Play first sound immediately
-        AudioServicesPlaySystemSound(1103) // Soft "tink" sound
+        AudioServicesPlayAlertSound(1103) // Soft "tink" sound
 
-        // Then repeat every 1.2 seconds for a gentle, unintrusive rhythm
-        thinkingSoundTimer = Timer.scheduledTimer(withTimeInterval: 1.2, repeats: true) { _ in
-            AudioServicesPlaySystemSound(1103)
+        // Repeat at ~100 BPM (0.6s interval) for a gentle rhythm
+        thinkingSoundTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { _ in
+            AudioServicesPlayAlertSound(1103)
         }
         RunLoop.main.add(thinkingSoundTimer!, forMode: .common)
     }

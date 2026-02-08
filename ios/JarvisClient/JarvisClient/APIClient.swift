@@ -23,6 +23,16 @@ import Foundation
 /// Response shape from the backend chat endpoint.
 struct AskResponse: Codable {
     let reply: String
+    let call_scheduled: CallScheduledInfo?
+}
+
+/// Info returned when the backend auto-schedules a phone call.
+struct CallScheduledInfo: Codable {
+    let call_id: Int?
+    let status: String?
+    let routing_type: String?
+    let target_name: String?
+    let target_phone: String?
 }
 
 // MARK: - Errors
@@ -57,6 +67,28 @@ final class APIClient {
         self.session = session
     }
 
+    /// Retries a request up to `maxRetries` times on timeout/network errors.
+    private func dataWithRetry(for request: URLRequest, maxRetries: Int = 1) async throws -> (Data, URLResponse) {
+        var lastError: Error?
+        for attempt in 0...maxRetries {
+            do {
+                return try await session.data(for: request)
+            } catch let urlError as URLError where
+                urlError.code == .timedOut ||
+                urlError.code == .networkConnectionLost ||
+                urlError.code == .notConnectedToInternet {
+                lastError = urlError
+                if attempt < maxRetries {
+                    // Wait briefly before retrying (500ms * attempt)
+                    try? await Task.sleep(nanoseconds: UInt64((attempt + 1)) * 500_000_000)
+                }
+            } catch {
+                throw error // Non-retryable error
+            }
+        }
+        throw lastError ?? APIClientError.unknown(NSError(domain: "APIClient", code: -1))
+    }
+
     // MARK: - Chat
 
     /// POSTs the messages to Secrets.chatEndpoint using a *single* JSON shape:
@@ -79,7 +111,7 @@ final class APIClient {
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await dataWithRetry(for: request)
         } catch let urlError as URLError {
             throw APIClientError.urlError(urlError)
         } catch {
@@ -127,7 +159,7 @@ final class APIClient {
 
         let (data, response): (Data, URLResponse)
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await dataWithRetry(for: request)
         } catch let urlError as URLError {
             throw APIClientError.urlError(urlError)
         } catch {

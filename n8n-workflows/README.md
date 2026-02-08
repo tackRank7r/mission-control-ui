@@ -67,10 +67,10 @@ In n8n Cloud: **Menu (☰) → Settings → Variables → + Add Variable**
 
 | Variable | Value |
 |----------|-------|
-| `JARVIS_BACKEND_URL` | `https://cgptproject-v2.onrender.com` |
-| `N8N_WEBHOOK_URL` | `https://fdaf.app.n8n.cloud/webhook` |
-| `TWILIO_FROM_NUMBER` | `+12568604020` |
-| `ADMIN_EMAIL` | `admin@sidekick360.net` |
+| `JARVIS_BACKEND_URL` | `https://YOUR-BACKEND.onrender.com` |
+| `N8N_WEBHOOK_URL` | `https://YOUR-N8N-INSTANCE.app.n8n.cloud/webhook` |
+| `TWILIO_FROM_NUMBER` | `+1XXXXXXXXXX` |
+| `ADMIN_EMAIL` | `admin@example.com` |
 
 ### 2. Credentials (n8n)
 
@@ -103,12 +103,12 @@ In your Twilio Console, set these webhook URLs:
 
 **Voice URL (when call answers):**
 ```
-https://fdaf.app.n8n.cloud/webhook/twilio-voice
+https://YOUR-N8N-INSTANCE.app.n8n.cloud/webhook/twilio-voice
 ```
 
 **Status Callback URL:**
 ```
-https://fdaf.app.n8n.cloud/webhook/twilio-status
+https://YOUR-N8N-INSTANCE.app.n8n.cloud/webhook/twilio-status
 ```
 
 ### 5. Backend Environment Variables
@@ -121,7 +121,7 @@ OPENAI_API_KEY=sk-...
 TWILIO_ACCOUNT_SID=AC...
 TWILIO_AUTH_TOKEN=...
 TWILIO_FROM_NUMBER=+1234567890
-N8N_BASE_URL=https://fdaf.app.n8n.cloud
+N8N_BASE_URL=https://YOUR-N8N-INSTANCE.app.n8n.cloud
 ```
 
 ---
@@ -161,7 +161,7 @@ N8N_BASE_URL=https://fdaf.app.n8n.cloud
 
 ### Test Call Scheduling
 ```bash
-curl -X POST https://cgptproject-v2.onrender.com/call/schedule \
+curl -X POST https://YOUR-BACKEND.onrender.com/call/schedule \
   -H "Authorization: Bearer YOUR_APP_BACKEND_BEARER" \
   -H "Content-Type: application/json" \
   -d '{
@@ -174,7 +174,7 @@ curl -X POST https://cgptproject-v2.onrender.com/call/schedule \
 
 ### Test Error Logging
 ```bash
-curl -X POST https://fdaf.app.n8n.cloud/webhook/log-error \
+curl -X POST https://YOUR-N8N-INSTANCE.app.n8n.cloud/webhook/log-error \
   -H "Content-Type: application/json" \
   -d '{
     "workflow": "test",
@@ -187,7 +187,7 @@ curl -X POST https://fdaf.app.n8n.cloud/webhook/log-error \
 
 ### Check Logs
 ```bash
-curl https://cgptproject-v2.onrender.com/n8n/logs \
+curl https://YOUR-BACKEND.onrender.com/n8n/logs \
   -H "Authorization: Bearer YOUR_APP_BACKEND_BEARER"
 ```
 

@@ -24,9 +24,10 @@ build/
 *.xcuserstate
 *.xccheckout
 *.xcscmblueprint
+xcuserdata/
 *.xcworkspace/xcuserdata/
-ios/JarvisClient/JarvisClient.xcodeproj/project.xcworkspace/xcuserdata/
-ios/JarvisClient/JarvisClient.xcodeproj/xcuserdata/
+**/*.xcodeproj/xcuserdata/
+**/*.xcodeproj/project.xcworkspace/xcuserdata/
 
 # Fastlane / screenshots (if used)
 fastlane/report.xml

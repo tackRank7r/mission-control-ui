@@ -26,6 +26,8 @@
 	<string>SideKick360 uses the microphone for voice chat and dictation.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>sidekick360 uses speech recognition to understand your voice</string>
+	<key>NSContactsUsageDescription</key>
+	<string>SideKick360 uses your contacts to look up phone numbers when scheduling calls.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

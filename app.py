@@ -84,7 +84,7 @@ WEEKLY_COST_LIMIT_CENTS = 2000       # $20/week
 WEEKLY_CALLS_PER_USER = 4
 
 # n8n webhook URLs
-N8N_BASE_URL = os.getenv("N8N_BASE_URL", "https://fdaf.app.n8n.cloud")
+N8N_BASE_URL = os.getenv("N8N_BASE_URL", "https://YOUR-N8N-INSTANCE.app.n8n.cloud")
 N8N_ERROR_WEBHOOK = os.getenv("N8N_ERROR_WEBHOOK", "")
 
 

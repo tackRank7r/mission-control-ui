@@ -1,6 +1,6 @@
 .PHONY: prove health ask stream wstest
 
-HOST ?= https://cgptproject-web.onrender.com
+HOST ?= https://YOUR-BACKEND.onrender.com
 TOKEN ?=
 
 prove:
