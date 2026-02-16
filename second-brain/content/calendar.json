@@ -1,0 +1,18 @@
+{
+  "week": "2026-Week06",
+  "blocks": [
+    {"day": "Sun", "date": "2026-02-09", "slots": [{"title": "AI scarcity research", "time": "5:00 AM", "tag": "Research", "color": "purple"}, {"title": "Morning brief", "time": "8:00 AM", "tag": "Ops", "color": "amber"}]},
+    {"day": "Mon", "date": "2026-02-10", "slots": [{"title": "Mission control check", "time": "8:00 AM", "tag": "Ops", "color": "blue"}, {"title": "Competitor scan", "time": "10:00 AM", "tag": "Intel", "color": "rose"}]},
+    {"day": "Tue", "date": "2026-02-11", "slots": [{"title": "Schedule-a-call review", "time": "9:00 AM", "tag": "Product", "color": "emerald"}, {"title": "Newsletter reminder", "time": "3:00 PM", "tag": "Content", "color": "orange"}]},
+    {"day": "Wed", "date": "2026-02-12", "slots": [{"title": "Mission Control cleanup", "time": "10:17 AM", "tag": "Project", "color": "violet"}, {"title": "Hotline QA", "time": "2:00 PM", "tag": "Voice", "color": "cyan"}]},
+    {"day": "Thu", "date": "2026-02-13", "slots": [{"title": "Mission Control demo", "time": "9:00 AM", "tag": "Product", "color": "amber"}, {"title": "Ops heartbeat", "time": "5:00 PM", "tag": "Ops", "color": "blue"}]},
+    {"day": "Fri", "date": "2026-02-14", "slots": [{"title": "Call summaries send", "time": "11:00 AM", "tag": "Ops", "color": "emerald"}, {"title": "YouTube script cut", "time": "3:00 PM", "tag": "Content", "color": "rose"}]},
+    {"day": "Sat", "date": "2026-02-15", "slots": [{"title": "System audit", "time": "9:00 AM", "tag": "Infra", "color": "slate"}]}
+  ],
+  "nextUp": [
+    {"title": "Mission control check", "dueIn": "in 30 min"},
+    {"title": "AI scarcity research", "dueIn": "in 17 hours"},
+    {"title": "Newsletter reminder", "dueIn": "in 20 hours"},
+    {"title": "Competitor YouTube scan", "dueIn": "in 22 hours"}
+  ]
+}

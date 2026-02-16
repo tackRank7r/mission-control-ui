@@ -1,0 +1,102 @@
+{
+  "stats": {
+    "thisWeek": 5,
+    "inProgress": 3,
+    "total": 24,
+    "completion": 0.42
+  },
+  "lanes": [
+    {
+      "id": "backlog",
+      "title": "Backlog",
+      "cards": [
+        {
+          "id": "record-claude",
+          "title": "Record Claude Code comparison",
+          "tags": [
+            "YouTube"
+          ],
+          "owner": "A",
+          "age": "8d"
+        },
+        {
+          "id": "ops-feed",
+          "title": "Build activity feed for sidebar",
+          "tags": [
+            "Agents"
+          ],
+          "owner": "H",
+          "age": "9d"
+        }
+      ]
+    },
+    {
+      "id": "in-progress",
+      "title": "In Progress",
+      "cards": [
+        {
+          "id": "mission-control-ui",
+          "title": "Mission Control UI (Next.js)",
+          "tags": [
+            "Mission Control"
+          ],
+          "owner": "N",
+          "age": "1d"
+        },
+        {
+          "id": "hotline",
+          "title": "Hotline webhook",
+          "tags": [
+            "Twilio"
+          ],
+          "owner": "A",
+          "age": "<1d"
+        },
+        {
+          "id": "sendgrid",
+          "title": "SendGrid summary template",
+          "tags": [
+            "Ops"
+          ],
+          "owner": "B",
+          "age": "2d"
+        }
+      ]
+    },
+    {
+      "id": "review",
+      "title": "Review",
+      "cards": [
+        {
+          "id": "call-metrics",
+          "title": "Call metrics dashboard",
+          "tags": [
+            "Analytics"
+          ],
+          "owner": "H",
+          "age": "3d"
+        }
+      ]
+    }
+  ],
+  "activity": [
+    {
+      "id": "act1",
+      "user": "henry",
+      "time": "4m",
+      "text": "Started 1last30days research: challenges teams are having with OpenClaw"
+    },
+    {
+      "id": "act2",
+      "user": "henry",
+      "time": "42m",
+      "text": "Fixed memory path bug \u2014 pointing to wrong workspace"
+    },
+    {
+      "id": "act3",
+      "user": "henry",
+      "time": "1h",
+      "text": "Redesigned activity feed for sidebar"
+    }
+  ]
+}

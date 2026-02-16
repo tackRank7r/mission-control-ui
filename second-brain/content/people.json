@@ -1,0 +1,72 @@
+[
+  {
+    "name": "Bill Danvers",
+    "role": "Founder / Operator",
+    "lastContact": "2026-02-12T17:00:00-06:00",
+    "focus": [
+      "Second brain vision",
+      "Mission control decisions",
+      "Twilio hotline"
+    ],
+    "notes": [
+      "Keep workflows codename-free unless told otherwise.",
+      "Prefers tight check-ins (<=15 min).",
+      "Needs hotline to greet with \"Hello Bill\" and keep context."
+    ],
+    "openItems": [
+      "Confirm SideKick360 call scheduling spec",
+      "Review Mission Control UI once tabs populated"
+    ]
+  },
+  {
+    "name": "Henry",
+    "role": "Ops / Automation Engineer",
+    "lastContact": "2026-02-12T09:00:00-06:00",
+    "focus": [
+      "Mission Control maintenance",
+      "Activity feed redesign"
+    ],
+    "notes": [
+      "Owns activity feed + cron automation",
+      "Filed bugs around memory path + removed unused tabs"
+    ],
+    "openItems": [
+      "Ship live activity feed cards",
+      "Monitor cron health reports"
+    ]
+  },
+  {
+    "name": "Alex",
+    "role": "Creative Lead",
+    "lastContact": "2026-02-12T10:17:00-06:00",
+    "focus": [
+      "Mission Control cleanup",
+      "Video content"
+    ],
+    "notes": [
+      "Driving the Mission Control cleanup project",
+      "Cuts unused tabs to keep dashboard minimal"
+    ],
+    "openItems": [
+      "Record walkthrough after cleanup",
+      "Review AI coding CLI script"
+    ]
+  },
+  {
+    "name": "Quill & Scout",
+    "role": "Research Pair",
+    "lastContact": "2026-02-12T08:01:00-06:00",
+    "focus": [
+      "Morning research",
+      "Script archival"
+    ],
+    "notes": [
+      "Clip entire 'I Tested Every AI Coding CLI' script",
+      "Deliver morning intel for YouTube + newsletter"
+    ],
+    "openItems": [
+      "Catalog comparison data",
+      "Share highlights in Memory view"
+    ]
+  }
+]

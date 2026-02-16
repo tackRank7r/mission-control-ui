@@ -144,8 +144,36 @@ All endpoints require `Authorization: Bearer <APP_BACKEND_BEARER>` header (excep
 |----------|--------|-------------|
 | `/twilio/voice` | POST | Initial call webhook (returns TwiML) |
 | `/twilio/voice/respond` | POST | Conversation turn webhook |
+| `/twilio/hotline` | POST | Direct hotline entry point for Bill Danvers |
+| `/twilio/hotline/respond` | POST | Hotline conversation turn webhook |
 | `/twilio/status` | POST | Call status callback |
 | `/audio/<cache_key>` | GET | Serve ElevenLabs audio |
+
+### Direct Hotline (Bill-only) Runbook
+
+**Local verification**
+1. `cd CGPTPROJECT-sanitized` and create a virtualenv (`python -m venv .venv && source .venv/bin/activate`).
+2. `pip install -r requirements.txt` to pull Flask + Twilio deps.
+3. Export the hotline secrets:
+   ```bash
+   export APP_BACKEND_BEARER=dev-token
+   export OPENAI_API_KEY=sk-...
+   export TWILIO_ACCOUNT_SID=AC...
+   export TWILIO_AUTH_TOKEN=...
+   export TWILIO_FROM_NUMBER=+1XXXXXXXXXX
+   ```
+4. Run the backend locally: `FLASK_APP=app.py flask run --port 5000`.
+5. Expose it to Twilio: `ngrok http 5000` (or `cloudflared tunnel run`). Copy the HTTPS URL.
+6. In the Twilio Console → Phone Numbers → Active Number, set **Voice & Fax → A Call Comes In** to `POST https://<ngrok>/twilio/hotline` and **Primary handler fails** to `https://<ngrok>/twilio/hotline/respond`.
+7. Call the number; the hotline will greet Bill by name, keep the session in memory for 60 minutes, and fall back to Polly if ElevenLabs is unavailable.
+8. Watch `flask run` logs for `Hotline chat failed` errors and Twilio call SIDs; inspect Twilio debugger if the call drops.
+
+**Render deployment**
+1. Commit + push changes to `main`.
+2. Render auto-builds; confirm the deploy log shows `POST /twilio/hotline` health pings succeeding.
+3. Update Render environment variables with the same values listed above (Dashboard → Service → Environment).
+4. In Twilio, point the production number at `https://<render-app>.onrender.com/twilio/hotline` and `/twilio/hotline/respond`.
+5. Place a verification call and confirm the response + audio streaming (Render logs should show `_hotline_ai_reply`).
 
 ---
 

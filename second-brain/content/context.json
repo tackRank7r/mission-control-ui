@@ -1,0 +1,17 @@
+{
+  "sync": {
+    "status": "Standing by",
+    "lastRun": "2026-02-12T15:30:00-06:00",
+    "note": "Awaiting next hotline ingest."
+  },
+  "hotline": {
+    "status": "Green",
+    "lastChecked": "2026-02-12T16:42:00-06:00",
+    "number": "+1 (555) 010-4401",
+    "note": "24/7 route to Bill's mobile is healthy.",
+    "incidents": [
+      "All webhooks ACKed in <400ms",
+      "No missed calls in the last 24h"
+    ]
+  }
+}

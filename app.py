@@ -17,6 +17,7 @@ import uuid
 import json
 import traceback
 import hashlib
+import io
 from datetime import datetime, timezone, timedelta
 from typing import Tuple, Optional
 from functools import wraps
@@ -76,6 +77,10 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM")  # Default: Rachel
 ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID", "")
 ELEVENLABS_PHONE_NUMBER_ID = os.getenv("ELEVENLABS_PHONE_NUMBER_ID", "")
+
+HOTLINE_SYSTEM_PROMPT = """You are SideKick360's concierge AI answering hotline calls from Bill Danvers.\nAlways greet him by name, keep responses concise for voice, and proactively offer help.\nConfirm actions before proceeding and end the call politely when he says goodbye."""
+HOTLINE_SESSION_TTL_SECONDS = 3600
+_hotline_sessions: dict = {}
 
 # Hybrid routing cost limits
 COST_PER_MIN_ELEVENLABS_AGENT = 10   # $0.10/min in cents
@@ -914,6 +919,189 @@ def _add_speech_to_twiml(twiml_element, text: str, base_url: str):
     twiml_element.say(text, voice="Polly.Matthew")
 
 
+def _cleanup_hotline_sessions():
+    if not _hotline_sessions:
+        return
+    cutoff = datetime.utcnow() - timedelta(seconds=HOTLINE_SESSION_TTL_SECONDS)
+    stale = [sid for sid, meta in _hotline_sessions.items() if meta.get("last_active", meta.get("created")) < cutoff]
+    for sid in stale:
+        _hotline_sessions.pop(sid, None)
+
+
+def _hotline_session(call_sid: str) -> dict:
+    _cleanup_hotline_sessions()
+    sid = call_sid or f"anon-{uuid.uuid4()}"
+    if sid not in _hotline_sessions:
+        _hotline_sessions[sid] = {
+            "messages": [{"role": "system", "content": HOTLINE_SYSTEM_PROMPT}],
+            "created": datetime.utcnow()
+        }
+    _hotline_sessions[sid]["last_active"] = datetime.utcnow()
+    return _hotline_sessions[sid]
+
+
+def _hotline_clear_session(call_sid: str):
+    if call_sid:
+        _hotline_sessions.pop(call_sid, None)
+
+
+def _hotline_ai_reply(call_sid: str, user_text: str) -> str:
+    if not OPENAI_API_KEY or not OpenAI:
+        return "I'm online, but I'm missing my OpenAI credentials."
+
+    session = _hotline_session(call_sid)
+    messages = session["messages"]
+
+    messages.append({"role": "user", "content": user_text})
+    # Keep system + last 12 exchanges max
+    trimmed = [messages[0]] + messages[ max(1, len(messages) - 24): ]
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        completion = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=trimmed,
+            temperature=0.7,
+            max_tokens=200
+        )
+        reply = (completion.choices[0].message.content or "").strip()
+    except Exception as exc:
+        app.logger.exception(f"Hotline chat failed: {exc}")
+        reply = "I'm having a little trouble on my end. Could you try that again?"
+
+    messages.append({"role": "assistant", "content": reply})
+    session["messages"] = messages[-26:]
+    return reply
+
+
+def _transcribe_with_whisper(recording_url: str) -> Optional[str]:
+    if not recording_url or not (OPENAI_API_KEY and OpenAI):
+        return None
+
+    url = recording_url
+    if not url.endswith(".mp3"):
+        url = f"{url}.mp3"
+
+    auth = None
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+        auth = (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.get(url, auth=auth)
+            resp.raise_for_status()
+            audio_bytes = resp.content
+    except Exception as exc:
+        app.logger.warning(f"Failed to download Twilio recording: {exc}")
+        return None
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "twilio-recording.mp3"
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file
+        )
+        text = (getattr(transcript, "text", None) or "").strip()
+        return text or None
+    except Exception as exc:
+        app.logger.warning(f"Whisper transcription failed: {exc}")
+        return None
+
+
+def _hotline_append_prompt(text: str, base_url: str):
+    gather = Gather(
+        input="speech",
+        action=f"{base_url}twilio/hotline/respond",
+        method="POST",
+        speech_timeout="auto",
+        speech_model="experimental_conversations",
+        language="en-US",
+        profanity_filter="false",
+        record="record-from-answer"
+    )
+    cache_key = generate_and_cache_audio(text, use_elevenlabs=False, prefer_openai=True)
+    if cache_key:
+        gather.play(f"{base_url}audio/{cache_key}")
+    else:
+        gather.say(text, voice="Polly.Matthew")
+    return gather
+
+
+@app.route("/twilio/hotline", methods=["POST"])
+def twilio_hotline_webhook():
+    """Inbound hotline that lets Bill Danvers talk directly to the assistant."""
+    if not VoiceResponse:
+        return "TwiML not available", 500
+
+    call_sid = request.values.get("CallSid", "")
+    _hotline_session(call_sid)
+
+    response = VoiceResponse()
+    base_url = request.url_root
+
+    greeting = "Hello Bill, what can I help you with today?"
+    response.append(_hotline_append_prompt(greeting, base_url))
+
+    retry = _hotline_append_prompt("Are you still there?", base_url)
+    response.append(retry)
+
+    _add_speech_to_twiml(response, "I'll hop off for now. Call me back anytime.", base_url)
+    response.hangup()
+    return Response(str(response), mimetype="application/xml")
+
+
+@app.route("/twilio/hotline/respond", methods=["POST"])
+def twilio_hotline_respond():
+    if not VoiceResponse:
+        return "TwiML not available", 500
+
+    call_sid = request.values.get("CallSid", "")
+    speech_result = (request.values.get("SpeechResult") or "").strip()
+    recording_url = request.values.get("RecordingUrl")
+
+    whisper_text = _transcribe_with_whisper(recording_url)
+    if whisper_text:
+        speech_result = whisper_text
+
+    if not speech_result:
+        speech_result = "I didn't catch anything just now."
+
+    reply = _hotline_ai_reply(call_sid, speech_result)
+    response = VoiceResponse()
+    base_url = request.url_root
+
+    end_signals = ["goodbye", "bye", "thanks", "thank you", "hang up", "nothing else"]
+    should_end = any(sig in speech_result.lower() for sig in end_signals)
+
+    if should_end:
+        cache_key = generate_and_cache_audio(reply, use_elevenlabs=False, prefer_openai=True)
+        if cache_key:
+            response.play(f"{base_url}audio/{cache_key}")
+        else:
+            response.say(reply, voice="Polly.Matthew")
+
+        farewell = "Talk soon."
+        cache_key = generate_and_cache_audio(farewell, use_elevenlabs=False, prefer_openai=True)
+        if cache_key:
+            response.play(f"{base_url}audio/{cache_key}")
+        else:
+            response.say(farewell, voice="Polly.Matthew")
+
+        response.hangup()
+        _hotline_clear_session(call_sid)
+        return Response(str(response), mimetype="application/xml")
+
+    response.append(_hotline_append_prompt(reply, base_url))
+    retry_prompt = _hotline_append_prompt("Are you still on the line?", base_url)
+    response.append(retry_prompt)
+    _add_speech_to_twiml(response, "I'll hang up for now, but call again if you need me.", base_url)
+    response.hangup()
+
+    return Response(str(response), mimetype="application/xml")
+
+
 @app.route("/twilio/voice", methods=["POST"])
 def twilio_voice_webhook():
     """
@@ -1125,6 +1313,9 @@ def twilio_status_webhook():
                 call.result_status = call_status.replace("-", "_")
                 call.completed_at = datetime.utcnow()
                 db.session.commit()
+        else:
+            if call_status in ["completed", "busy", "no-answer", "failed", "canceled"]:
+                _hotline_clear_session(call_sid)
 
         return jsonify(ok=True)
     except Exception as e:
@@ -1584,10 +1775,16 @@ def _elevenlabs_tts(text: str, voice_id: str = None) -> bytes:
         return response.content
 
 
-def generate_and_cache_audio(text: str, use_elevenlabs: bool = True) -> str:
+def generate_and_cache_audio(text: str, use_elevenlabs: bool = True, prefer_openai: bool = False) -> str:
     """Generate audio and return a cache key for retrieval."""
-    # Include voice ID in cache key so changing voice generates new audio
-    voice_key = ELEVENLABS_VOICE_ID if (use_elevenlabs and ELEVENLABS_API_KEY) else "polly"
+    # Include voice ID / provider in cache key so changing voice generates new audio
+    if use_elevenlabs and ELEVENLABS_API_KEY:
+        voice_key = f"elevenlabs:{ELEVENLABS_VOICE_ID}"
+    elif prefer_openai:
+        voice_key = "openai"
+    else:
+        voice_key = "polly"
+
     cache_key = hashlib.md5(f"{voice_key}:{text}".encode()).hexdigest()[:16]
 
     if cache_key not in _audio_cache:
@@ -1597,10 +1794,14 @@ def generate_and_cache_audio(text: str, use_elevenlabs: bool = True) -> str:
                 audio_bytes = _elevenlabs_tts(text)
                 app.logger.info(f"ElevenLabs audio generated successfully, {len(audio_bytes)} bytes")
             else:
-                app.logger.info("ElevenLabs not configured, falling back to Polly")
+                provider = "OpenAI" if prefer_openai else "Polly"
+                app.logger.info(f"Generating TTS with {provider}")
                 # Fallback to Polly or OpenAI
                 try:
-                    audio_bytes = _polly_tts(text)
+                    if prefer_openai:
+                        audio_bytes = _openai_tts(text)
+                    else:
+                        audio_bytes = _polly_tts(text)
                 except Exception:
                     audio_bytes = _openai_tts(text)
 

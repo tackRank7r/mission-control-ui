@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+:root {
+  --background: #020309;
+  --foreground: #f8fafc;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+.prose-invert {
+  --tw-prose-body: #cbd5f5;
+  --tw-prose-headings: #f1f5ff;
+  --tw-prose-links: #c084fc;
+  --tw-prose-bold: #ffffff;
+}

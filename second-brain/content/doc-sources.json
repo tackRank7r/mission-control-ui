@@ -1,0 +1,13 @@
+[
+  { "title": "AGENTS.md", "tag": "Workspace", "path": "../../AGENTS.md", "updated": "2026-02-11T10:00:00-06:00" },
+  { "title": "SOUL.md", "tag": "Workspace", "path": "../../SOUL.md", "updated": "2026-02-11T10:00:00-06:00" },
+  { "title": "USER.md", "tag": "Workspace", "path": "../../USER.md", "updated": "2026-02-11T10:00:00-06:00" },
+  { "title": "IDENTITY.md", "tag": "Workspace", "path": "../../IDENTITY.md", "updated": "2026-02-11T10:00:00-06:00" },
+  { "title": "HEARTBEAT.md", "tag": "Ops", "path": "../../HEARTBEAT.md", "updated": "2026-02-11T10:00:00-06:00" },
+  { "title": "BOOTSTRAP.md", "tag": "Ops", "path": "../../BOOTSTRAP.md", "updated": "2026-02-11T10:00:00-06:00" },
+  { "title": "Project README", "tag": "Backend", "path": "../README.md", "updated": "2026-02-11T21:00:00-06:00" },
+  { "title": "Technical Runbook", "tag": "Backend", "path": "../RUNBOOK.md", "updated": "2026-02-11T21:00:00-06:00" },
+  { "title": "Schedule Call Spec", "tag": "Product", "path": "../docs/schedule-call-spec.md", "updated": "2026-02-12T16:46:00-06:00" },
+  { "title": "Operations Progress Log", "tag": "Ops", "path": "../progress.md", "updated": "2026-02-12T17:45:00-06:00" },
+  { "title": "n8n Workflow Notes", "tag": "Automation", "path": "../n8n-workflows/README.md", "updated": "2026-02-11T19:00:00-06:00" }
+]

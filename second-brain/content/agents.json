@@ -1,0 +1,44 @@
+[
+  {
+    "name": "UI Vanguard",
+    "codename": "Glasshouse",
+    "task": "Own the Mission Control UI polish + new cockpit widgets",
+    "permissions": "Repo: read/write, limited production previews",
+    "cadence": "Every 30 minutes via Mission Log",
+    "status": "online",
+    "channel": "Design Thread",
+    "lastReport": "2026-02-14T19:45:00.000Z",
+    "notes": [
+      "Coordinating layout spacing changes with main UI agent",
+      "On call for quick contrast fixes"
+    ]
+  },
+  {
+    "name": "Systems Cartographer",
+    "codename": "Atlas",
+    "task": "Map new data sources into the dashboard and keep schemas tidy",
+    "permissions": "Repo: read/write, infra configs read-only",
+    "cadence": "Hourly status pings",
+    "status": "deploying",
+    "channel": "Ops Relay",
+    "lastReport": "2026-02-14T18:30:00.000Z",
+    "notes": [
+      "Watching Prisma migration",
+      "Next sync focused on calendar ingestion"
+    ]
+  },
+  {
+    "name": "Narrative Scout",
+    "codename": "Echo",
+    "task": "Summarize memory entries and prep investor-ready snippets",
+    "permissions": "Repo: read-only, content folder write",
+    "cadence": "Every stand-up",
+    "status": "idle",
+    "channel": "Storyline",
+    "lastReport": "2026-02-14T17:05:00.000Z",
+    "notes": [
+      "Waiting on new memory dump",
+      "Needs sign-off on tone guide"
+    ]
+  }
+]
